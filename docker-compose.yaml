@@ -1,0 +1,39 @@
+services:
+  siem:
+    build: .
+    image: sammascanner/siem:v0.1
+    ports:
+      - "8080:8080"
+    networks:
+      - samma
+    volumes:
+      - ../siem-rules/rules:/app/rules:ro
+    environment:
+      - SIEM_HTTP_PORT=8080
+      - SIEM_NATS_URL=nats://nats:4222
+      - SIEM_NATS_SUBSCRIBE=samma.logs.>
+      - SIEM_RULES_DIR=/app/rules
+
+  nats:
+    image: nats:latest
+    networks:
+      - samma
+    ports:
+      - "4222:4222"
+
+  test:
+    build:
+      context: .
+      target: test
+    volumes:
+      - ../siem-rules/rules:/app/rules:ro
+      - ../siem-rules/test:/app/test:ro
+    environment:
+      - SIEM_RULES_DIR=/app/rules
+      - SIEM_TEST_DIR=/app/test
+    networks:
+      - samma
+
+networks:
+  samma:
+    external: true
