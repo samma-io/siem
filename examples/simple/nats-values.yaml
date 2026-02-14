@@ -1,0 +1,18 @@
+config:
+  jetstream:
+    enabled: true
+    fileStore:
+      pvc:
+        size: 1Gi
+
+container:
+  merge:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
+
+natsBox:
+  enabled: true

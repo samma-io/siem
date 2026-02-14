@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink
+  namespace: samma
+  labels:
+    app: alert-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-sink
+  template:
+    metadata:
+      labels:
+        app: alert-sink
+    spec:
+      containers:
+        - name: vector
+          image: timberio/vector:0.35.0-alpine
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: alert-sink-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-sink-config
+  namespace: samma
+data:
+  vector.yaml: |
+    data_dir: /vector-data-dir
+
+    sources:
+      nats_alerts:
+        type: nats
+        url: "nats://nats.samma.svc.cluster.local:4222"
+        subject: "samma.alerts.>"
+        queue: "alert-sink"
+
+    transforms:
+      prepare_for_es:
+        type: remap
+        inputs:
+          - nats_alerts
+        source: |
+          .@timestamp = now()
+
+          # Extract index name from the alert rule severity
+          severity = downcase(string!(.rule.severity))
+          .index_name = "samma-alerts-" + severity
+
+    sinks:
+      elasticsearch:
+        type: elasticsearch
+        inputs:
+          - prepare_for_es
+        endpoints:
+          - "http://elasticsearch.samma.svc.cluster.local:9200"
+        bulk:
+          index: "{{ index_name }}"
+        encoding:
+          except_fields:
+            - index_name

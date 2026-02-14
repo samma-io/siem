@@ -1,0 +1,45 @@
+role: Aggregator
+
+customConfig:
+  data_dir: /vector-data-dir
+
+  sources:
+    fluent_bit:
+      type: fluent
+      address: 0.0.0.0:24224
+
+  transforms:
+    format_logs:
+      type: remap
+      inputs:
+        - fluent_bit
+      source: |
+        # Ensure we have a structured log event
+        .timestamp = now()
+        .source = "kubernetes"
+
+        # Extract kubernetes metadata if present
+        if exists(.kubernetes) {
+          .k8s_namespace = .kubernetes.namespace_name
+          .k8s_pod = .kubernetes.pod_name
+          .k8s_container = .kubernetes.container_name
+        }
+
+        # Flatten nested log field if present
+        if exists(.log) && is_string(.log) {
+          parsed, err = parse_json(.log)
+          if err == null {
+            . = merge(., parsed)
+            del(.log)
+          }
+        }
+
+  sinks:
+    nats_logs:
+      type: nats
+      inputs:
+        - format_logs
+      url: "nats://nats.samma.svc.cluster.local:4222"
+      subject: "samma.logs.k8s.{{ k8s_namespace }}"
+      encoding:
+        codec: json
