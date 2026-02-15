@@ -29,7 +29,7 @@ customConfig:
         if exists(.log) && is_string(.log) {
           parsed, err = parse_json(.log)
           if err == null {
-            . = merge(., parsed)
+            . = merge!(., parsed)
             del(.log)
           }
         }
@@ -40,6 +40,7 @@ customConfig:
       inputs:
         - format_logs
       url: "nats://nats.samma.svc.cluster.local:4222"
-      subject: "samma.logs.k8s.{{ k8s_namespace }}"
+      subject: "samma.logs.k8s"
+      connection_name: "vector-log-sink"
       encoding:
         codec: json

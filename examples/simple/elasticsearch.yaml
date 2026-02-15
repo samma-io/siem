@@ -17,11 +17,14 @@ spec:
         app: elasticsearch
     spec:
       initContainers:
-        - name: sysctl
+        - name: fix-permissions
           image: busybox
-          command: ["sysctl", "-w", "vm.max_map_count=262144"]
-          securityContext:
-            privileged: true
+          command: ["sh", "-c", "chown -R 1000:1000 /usr/share/elasticsearch/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: elasticsearch
           image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0

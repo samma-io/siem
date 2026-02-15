@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: vector
-          image: timberio/vector:0.35.0-alpine
+          image: timberio/vector:0.53.0-alpine
           volumeMounts:
             - name: config
               mountPath: /etc/vector
@@ -47,6 +47,7 @@ data:
         url: "nats://nats.samma.svc.cluster.local:4222"
         subject: "samma.alerts.>"
         queue: "alert-sink"
+        connection_name: "alert-sink"
 
     transforms:
       prepare_for_es:
@@ -56,8 +57,22 @@ data:
         source: |
           .@timestamp = now()
 
-          # Extract index name from the alert rule severity
-          severity = downcase(string!(.rule.severity))
+          # Parse the NATS message payload (JSON string from the SIEM)
+          if is_string(.message) {
+            parsed, err = parse_json(.message)
+            if err == null {
+              .rule = parsed.rule
+              .event = parsed.event
+              del(.message)
+            }
+          }
+
+          # Determine ES index by alert severity
+          severity = if exists(.rule.severity) {
+            downcase(string!(.rule.severity))
+          } else {
+            "unknown"
+          }
           .index_name = "samma-alerts-" + severity
 
     sinks:

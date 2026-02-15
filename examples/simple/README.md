@@ -3,7 +3,7 @@
 This example deploys the Samma SIEM into a Kubernetes cluster with the following pipeline:
 
 ```
-K8s Logs --> Fluent Bit --> Vector --> NATS --> SIEM --> NATS (alerts) --> Vector (sink) --> Elasticsearch
+K8s Logs --> Fluent Bit --> Vector --> NATS --> SIEM --> NATS (alerts) --> Vector (sink) --> Elasticsearch --> Grafana
 ```
 
 ## Architecture
@@ -16,6 +16,7 @@ K8s Logs --> Fluent Bit --> Vector --> NATS --> SIEM --> NATS (alerts) --> Vecto
 | SIEM            | Reads logs from NATS, evaluates rules, publishes alerts to NATS   |
 | Alert Sink      | Vector instance that subscribes to NATS alerts and writes to Elasticsearch |
 | Elasticsearch   | Stores alerts for search and analysis                             |
+| Grafana         | Dashboard UI for visualizing and exploring alerts                 |
 
 ## Prerequisites
 
@@ -133,6 +134,29 @@ writes every alert into Elasticsearch, indexed by severity.
 kubectl apply -f alert-sink.yaml
 ```
 
+## Step 9 - Deploy Grafana
+
+Grafana is pre-configured with an Elasticsearch datasource pointing at the `samma-alerts-*`
+indices. Default credentials are `admin` / `samma`.
+
+```bash
+kubectl apply -f grafana.yaml
+```
+
+Wait for it to start:
+
+```bash
+kubectl wait -n samma --for=condition=ready pod -l app=grafana --timeout=90s
+```
+
+Access the Grafana UI:
+
+```bash
+kubectl port-forward -n samma svc/grafana 3000:3000
+```
+
+Then open http://localhost:3000 and go to **Explore** to query alerts from Elasticsearch.
+
 ## Verify the full pipeline
 
 1. **Check all pods are running:**
@@ -161,6 +185,15 @@ kubectl port-forward -n samma svc/elasticsearch 9200:9200 &
 curl -s 'http://localhost:9200/samma-alerts-*/_search?pretty'
 ```
 
+5. **View alerts in Grafana:**
+
+```bash
+kubectl port-forward -n samma svc/grafana 3000:3000
+```
+
+Open http://localhost:3000 (admin / samma), go to **Explore**, select the
+**Elasticsearch - Alerts** datasource, and run a query.
+
 ## Data flow summary
 
 ```
@@ -183,6 +216,10 @@ curl -s 'http://localhost:9200/samma-alerts-*/_search?pretty'
                                                          v
                                                    Elasticsearch
                                                   (samma-alerts-*)
+                                                         │
+                                                         v
+                                                      Grafana
+                                                    (dashboards)
 ```
 
 ## Cleanup
@@ -191,6 +228,7 @@ curl -s 'http://localhost:9200/samma-alerts-*/_search?pretty'
 helm uninstall fluent-bit -n samma
 helm uninstall vector -n samma
 helm uninstall nats -n samma
+kubectl delete -f grafana.yaml
 kubectl delete -f alert-sink.yaml
 kubectl delete -f siem.yaml
 kubectl delete -f elasticsearch.yaml
