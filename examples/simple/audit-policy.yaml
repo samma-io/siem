@@ -1,0 +1,123 @@
+# Kubernetes API server audit policy for Samma SIEM
+# Install on control plane nodes and reference via:
+#   --audit-policy-file=/path/to/audit-policy.yaml
+#   --audit-log-path=/var/log/audit/kube/kube-apiserver.log
+#
+# This policy captures security-relevant events at RequestResponse level
+# and other events at Metadata level for comprehensive threat detection.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Skip logging requests to certain non-resource URLs
+  - level: None
+    nonResourceURLs:
+      - "/healthz*"
+      - "/readyz*"
+      - "/livez*"
+      - "/metrics"
+
+  # Skip logging watch requests (too noisy)
+  - level: None
+    verbs: ["watch"]
+
+  # Log secret access at Metadata level (RequestResponse would log secret values)
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+
+  # Log token requests at Metadata level
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["serviceaccounts/token"]
+
+  # Log pod exec/attach/portforward at RequestResponse level
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward", "pods/log"]
+
+  # Log pod creation at RequestResponse (captures requestObject for privileged detection)
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["pods"]
+    verbs: ["create"]
+
+  # Log RBAC changes at RequestResponse level
+  - level: RequestResponse
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources:
+          - "roles"
+          - "clusterroles"
+          - "rolebindings"
+          - "clusterrolebindings"
+
+  # Log admission webhook changes at RequestResponse level
+  - level: RequestResponse
+    resources:
+      - group: "admissionregistration.k8s.io"
+        resources:
+          - "mutatingwebhookconfigurations"
+          - "validatingwebhookconfigurations"
+
+  # Log service creation at RequestResponse (captures NodePort/LoadBalancer type)
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["services"]
+    verbs: ["create", "update", "patch"]
+
+  # Log ingress changes at RequestResponse level
+  - level: RequestResponse
+    resources:
+      - group: "networking.k8s.io"
+        resources: ["ingresses", "networkpolicies"]
+
+  # Log CronJob/Job changes
+  - level: RequestResponse
+    resources:
+      - group: "batch"
+        resources: ["cronjobs", "jobs"]
+
+  # Log workload changes (deployments, daemonsets, statefulsets)
+  - level: RequestResponse
+    resources:
+      - group: "apps"
+        resources: ["deployments", "daemonsets", "statefulsets"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log configmap changes in kube-system (CoreDNS etc)
+  - level: RequestResponse
+    namespaces: ["kube-system"]
+    resources:
+      - group: ""
+        resources: ["configmaps"]
+    verbs: ["update", "patch", "delete"]
+
+  # Log namespace and event deletion
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["namespaces", "events"]
+    verbs: ["delete", "deletecollection"]
+
+  # Log service account creation
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["serviceaccounts"]
+    verbs: ["create", "delete"]
+
+  # Log authentication events
+  - level: Metadata
+    resources:
+      - group: "authentication.k8s.io"
+        resources: ["tokenreviews"]
+
+  # Catch-all: log everything else at Metadata level
+  - level: Metadata
+    omitStages:
+      - "RequestReceived"

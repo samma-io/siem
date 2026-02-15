@@ -1,0 +1,111 @@
+# Vector DaemonSet for collecting Kubernetes API server audit logs
+# Audit logs are written by kube-apiserver to /var/log/audit/kube/ on control plane nodes
+# This collector reads those logs, parses the JSON, and publishes to NATS
+#
+# Prerequisites:
+#   - kube-apiserver must have audit logging enabled:
+#       --audit-log-path=/var/log/audit/kube/kube-apiserver.log
+#       --audit-policy-file=/path/to/audit-policy.yaml
+#       --audit-log-maxage=30
+#       --audit-log-maxbackup=10
+#       --audit-log-maxsize=100
+#   - This DaemonSet runs only on control plane nodes via nodeSelector
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: audit-log-collector
+  namespace: samma
+  labels:
+    app: audit-log-collector
+spec:
+  selector:
+    matchLabels:
+      app: audit-log-collector
+  template:
+    metadata:
+      labels:
+        app: audit-log-collector
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+      containers:
+        - name: vector
+          image: timberio/vector:0.41.1-alpine
+          volumeMounts:
+            - name: audit-logs
+              mountPath: /var/log/audit/kube
+              readOnly: true
+            - name: vector-data
+              mountPath: /vector-data-dir
+            - name: config
+              mountPath: /etc/vector
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: audit-logs
+          hostPath:
+            path: /var/log/audit/kube
+            type: DirectoryOrCreate
+        - name: vector-data
+          hostPath:
+            path: /var/lib/vector/audit
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: audit-log-collector-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-log-collector-config
+  namespace: samma
+data:
+  vector.yaml: |
+    data_dir: /vector-data-dir
+
+    sources:
+      audit_log:
+        type: file
+        include:
+          - /var/log/audit/kube/kube-apiserver.log
+        read_from: beginning
+        fingerprint:
+          strategy: device_and_inode
+
+    transforms:
+      parse_audit:
+        type: remap
+        inputs:
+          - audit_log
+        source: |
+          # Parse the JSON audit log line
+          parsed, err = parse_json(.message)
+          if err != null {
+            log("Failed to parse audit log: " + err, level: "warn")
+            abort
+          }
+          . = parsed
+          .source = "k8s-audit"
+          .timestamp = now()
+
+    sinks:
+      nats_audit:
+        type: nats
+        inputs:
+          - parse_audit
+        url: "nats://nats.samma.svc.cluster.local:4222"
+        subject: "samma.logs.k8s.audit"
+        connection_name: "vector-audit-collector"
+        encoding:
+          codec: json
