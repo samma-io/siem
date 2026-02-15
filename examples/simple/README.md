@@ -136,11 +136,17 @@ kubectl apply -f alert-sink.yaml
 
 ## Step 9 - Deploy Grafana
 
-Grafana is pre-configured with an Elasticsearch datasource pointing at the `samma-alerts-*`
-indices. Default credentials are `admin` / `samma`.
+Grafana is pre-configured with an Elasticsearch datasource and two dashboards.
+Default credentials are `admin` / `samma`.
 
 ```bash
 kubectl apply -f grafana.yaml
+```
+
+Load the Samma dashboards from the `dashboards/` directory in the repo root:
+
+```bash
+kubectl create configmap grafana-dashboards -n samma --from-file=../../dashboards/
 ```
 
 Wait for it to start:
@@ -155,7 +161,12 @@ Access the Grafana UI:
 kubectl port-forward -n samma svc/grafana 3000:3000
 ```
 
-Then open http://localhost:3000 and go to **Explore** to query alerts from Elasticsearch.
+Open http://localhost:3000 and find the dashboards under the **Samma** folder:
+
+- **Compliance Overview** - Alerts grouped by compliance framework (PCI DSS, GDPR,
+  HIPAA, NIST 800-53, MITRE ATT&CK, TSC, GPG13) with severity breakdown and timeline.
+- **Service Alerts** - Alerts broken down by service (Kubernetes, Nmap, Nikto, AWS)
+  with a service filter, per-rule counts, and detailed alert table.
 
 ## Verify the full pipeline
 

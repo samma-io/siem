@@ -1,0 +1,539 @@
+{
+  "uid": "samma-compliance",
+  "title": "Samma - Compliance Overview",
+  "description": "Alert overview grouped by compliance frameworks (PCI DSS, GDPR, HIPAA, NIST 800-53, MITRE ATT&CK, TSC, GPG13)",
+  "tags": ["samma", "compliance", "siem"],
+  "timezone": "browser",
+  "editable": true,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Alerts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "query": "*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 2,
+      "title": "High Severity Alerts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "query": "rule.severity.keyword:high",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Medium Severity Alerts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "query": "rule.severity.keyword:medium",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "orange", "value": 20 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Unique Rules Triggered",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "cardinality", "id": "1", "field": "rule.name.keyword" }],
+          "query": "*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Alerts by Severity",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.severity.keyword",
+              "settings": { "size": "10", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"] }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "medium" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "title": "Alert Timeline",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 4 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "3",
+              "field": "rule.severity.keyword",
+              "settings": { "size": "5", "order": "desc", "orderBy": "_count" }
+            },
+            {
+              "type": "date_histogram",
+              "id": "2",
+              "field": "@timestamp",
+              "settings": { "interval": "auto" }
+            }
+          ],
+          "query": "*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": { "mode": "normal" },
+            "fillOpacity": 80
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "medium" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "title": "PCI DSS",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.compliance.pci_dss.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "rule.compliance.pci_dss:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 11,
+      "title": "NIST 800-53",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 12 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.compliance.nist_800_53.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "rule.compliance.nist_800_53:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 12,
+      "title": "MITRE ATT&CK",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 12 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.compliance.mitre.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "rule.compliance.mitre:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 13,
+      "title": "GDPR",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 20 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.compliance.gdpr.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "rule.compliance.gdpr:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 14,
+      "title": "HIPAA",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 20 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.compliance.hipaa.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "rule.compliance.hipaa:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 15,
+      "title": "TSC (Trust Services Criteria)",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 20 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.compliance.tsc.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "rule.compliance.tsc:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 16,
+      "title": "GPG13",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 20 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.compliance.gpg13.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "rule.compliance.gpg13:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 20,
+      "title": "Recent Alerts",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [
+            {
+              "type": "raw_data",
+              "id": "1",
+              "settings": { "size": "50" }
+            }
+          ],
+          "query": "rule.name:*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "@timestamp": true,
+              "rule.name": true,
+              "rule.description": true,
+              "rule.severity": true,
+              "rule.compliance.pci_dss": true,
+              "rule.compliance.mitre": true,
+              "rule.compliance.nist_800_53": true,
+              "subject": true
+            },
+            "indexByName": {
+              "@timestamp": 0,
+              "rule.severity": 1,
+              "rule.name": 2,
+              "rule.description": 3,
+              "rule.compliance.mitre": 4,
+              "rule.compliance.pci_dss": 5,
+              "rule.compliance.nist_800_53": 6,
+              "subject": 7
+            },
+            "renameByName": {
+              "@timestamp": "Time",
+              "rule.name": "Rule",
+              "rule.description": "Description",
+              "rule.severity": "Severity",
+              "rule.compliance.pci_dss": "PCI DSS",
+              "rule.compliance.mitre": "MITRE",
+              "rule.compliance.nist_800_53": "NIST",
+              "subject": "NATS Subject"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Severity" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "high": { "text": "HIGH", "color": "red" } } },
+                  { "type": "value", "options": { "medium": { "text": "MEDIUM", "color": "orange" } } },
+                  { "type": "value", "options": { "low": { "text": "LOW", "color": "yellow" } } }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

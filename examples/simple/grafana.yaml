@@ -29,6 +29,12 @@ spec:
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
               readOnly: true
+            - name: dashboard-provisioning
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            - name: dashboards
+              mountPath: /opt/grafana/dashboards
+              readOnly: true
             - name: data
               mountPath: /var/lib/grafana
           resources:
@@ -41,6 +47,12 @@ spec:
         - name: datasources
           configMap:
             name: grafana-datasources
+        - name: dashboard-provisioning
+          configMap:
+            name: grafana-dashboard-provisioning
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
         - name: data
           emptyDir: {}
 ---
@@ -54,6 +66,7 @@ data:
     apiVersion: 1
     datasources:
       - name: Elasticsearch - Alerts
+        uid: samma-es-alerts
         type: elasticsearch
         access: proxy
         url: http://elasticsearch.samma.svc.cluster.local:9200
@@ -76,3 +89,22 @@ spec:
   ports:
     - port: 3000
       targetPort: 3000
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provisioning
+  namespace: samma
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: samma
+        orgId: 1
+        folder: Samma
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        options:
+          path: /opt/grafana/dashboards
+          foldersFromFilesStructure: false

@@ -1,0 +1,384 @@
+{
+  "uid": "samma-services",
+  "title": "Samma - Service Alerts",
+  "description": "Alert breakdown by service (Kubernetes, Nmap, Nikto, AWS, etc.)",
+  "tags": ["samma", "services", "siem"],
+  "timezone": "browser",
+  "editable": true,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "custom",
+        "label": "Service",
+        "current": { "text": "All", "value": "*" },
+        "options": [
+          { "text": "All", "value": "*", "selected": true },
+          { "text": "Kubernetes", "value": "samma.alerts.k8s.*", "selected": false },
+          { "text": "Nmap", "value": "samma.alerts.nmap.*", "selected": false },
+          { "text": "Nikto", "value": "samma.alerts.nikto.*", "selected": false },
+          { "text": "AWS", "value": "samma.alerts.aws.*", "selected": false }
+        ],
+        "query": "All : *, Kubernetes : samma.alerts.k8s.*, Nmap : samma.alerts.nmap.*, Nikto : samma.alerts.nikto.*, AWS : samma.alerts.aws.*",
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Alerts by Service",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "subject.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"] }
+      },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "title": "Alerts by Rule",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.name.keyword",
+              "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "subject.keyword:$service",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": { "displayMode": "hidden" }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Severity Distribution",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "2",
+              "field": "rule.severity.keyword",
+              "settings": { "size": "10", "order": "desc", "orderBy": "_count" }
+            }
+          ],
+          "query": "subject.keyword:$service",
+          "timeField": "@timestamp"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"] }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "medium" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "title": "Alert Timeline by Service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            {
+              "type": "terms",
+              "id": "3",
+              "field": "subject.keyword",
+              "settings": { "size": "10", "order": "desc", "orderBy": "_count" }
+            },
+            {
+              "type": "date_histogram",
+              "id": "2",
+              "field": "@timestamp",
+              "settings": { "interval": "auto" }
+            }
+          ],
+          "query": "subject.keyword:$service",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": { "mode": "normal" },
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "panels": [],
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "title": "Kubernetes Alerts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 17 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "query": "subject.keyword:samma.alerts.k8s.*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Nmap Alerts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 17 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "query": "subject.keyword:samma.alerts.nmap.*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Nikto Alerts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 17 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "query": "subject.keyword:samma.alerts.nikto.*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 20 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 14,
+      "title": "AWS Alerts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 17 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "query": "subject.keyword:samma.alerts.aws.*",
+          "timeField": "@timestamp"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] }
+      }
+    },
+    {
+      "id": 20,
+      "title": "Alert Details",
+      "type": "table",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 21 },
+      "datasource": { "type": "elasticsearch", "uid": "samma-es-alerts" },
+      "targets": [
+        {
+          "refId": "A",
+          "metrics": [
+            {
+              "type": "raw_data",
+              "id": "1",
+              "settings": { "size": "100" }
+            }
+          ],
+          "query": "subject.keyword:$service",
+          "timeField": "@timestamp"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "@timestamp": true,
+              "rule.name": true,
+              "rule.description": true,
+              "rule.severity": true,
+              "subject": true,
+              "event.kind": true,
+              "event.verb": true
+            },
+            "indexByName": {
+              "@timestamp": 0,
+              "rule.severity": 1,
+              "rule.name": 2,
+              "rule.description": 3,
+              "subject": 4,
+              "event.kind": 5,
+              "event.verb": 6
+            },
+            "renameByName": {
+              "@timestamp": "Time",
+              "rule.name": "Rule",
+              "rule.description": "Description",
+              "rule.severity": "Severity",
+              "subject": "Service / Subject",
+              "event.kind": "Event Kind",
+              "event.verb": "Event Verb"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Severity" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "high": { "text": "HIGH", "color": "red" } } },
+                  { "type": "value", "options": { "medium": { "text": "MEDIUM", "color": "orange" } } },
+                  { "type": "value", "options": { "low": { "text": "LOW", "color": "yellow" } } }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
