@@ -1,0 +1,251 @@
+---
+# Vector Collector — receives logs from Fluent Bit, enriches metadata, publishes to NATS
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-collector-config
+  namespace: logging
+data:
+  vector.toml: |
+    [api]
+    enabled = true
+    address = "0.0.0.0:8686"
+
+    # Receive logs from Fluent Bit via Fluent Forward protocol
+    [sources.fluent_in]
+    type = "fluent"
+    address = "0.0.0.0:24224"
+
+    # Receive syslog over UDP (routers, servers, firewalls)
+    [sources.syslog_udp]
+    type = "socket"
+    mode = "udp"
+    address = "0.0.0.0:514"
+
+    [sources.syslog_udp.decoding]
+    codec = "syslog"
+
+    # Receive syslog over TCP
+    [sources.syslog_tcp]
+    type = "socket"
+    mode = "tcp"
+    address = "0.0.0.0:514"
+
+    [sources.syslog_tcp.decoding]
+    codec = "syslog"
+
+    # Enrich Kubernetes logs with metadata from Fluent Bit field names
+    [transforms.enrich_k8s]
+    type = "remap"
+    inputs = ["fluent_in"]
+    source = '''
+      .source_type = "kubernetes"
+      .namespace = string(.kubernetes.namespace_name) ?? "unknown"
+      .pod       = string(.kubernetes.pod_name)       ?? "unknown"
+      .container = string(.kubernetes.container_name) ?? "unknown"
+      if !exists(.message) {
+        .message = string(.log) ?? encode_json(.)
+      }
+    '''
+
+    # Enrich syslog with source labels
+    [transforms.enrich_syslog]
+    type = "remap"
+    inputs = ["syslog_udp", "syslog_tcp"]
+    source = '''
+      .source_type = "syslog"
+      .namespace = "syslog"
+      .pod = "external"
+      .container = "syslog"
+    '''
+
+    # Publish all logs to NATS JetStream — SIEM subscribes to samma.logs.>
+    [sinks.nats_out]
+    type = "nats"
+    inputs = ["enrich_k8s", "enrich_syslog"]
+    url = "nats://nats.logging.svc.cluster.local:4222"
+    subject = "samma.logs.k8s"
+    connection_name = "vector-collector"
+
+    [sinks.nats_out.encoding]
+    codec = "json"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vector-collector
+  namespace: logging
+  labels:
+    app: vector-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vector-collector
+  template:
+    metadata:
+      labels:
+        app: vector-collector
+    spec:
+      containers:
+        - name: vector
+          image: timberio/vector:0.39.0-distroless-libc
+          args: ["--config", "/etc/vector/vector.toml"]
+          ports:
+            - name: fluent
+              containerPort: 24224
+              protocol: TCP
+            - name: syslog-udp
+              containerPort: 514
+              protocol: UDP
+            - name: syslog-tcp
+              containerPort: 514
+              protocol: TCP
+            - name: api
+              containerPort: 8686
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: vector-collector-config
+---
+# ClusterIP for Fluent Bit → Vector (Fluent Forward protocol)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector-collector
+  namespace: logging
+spec:
+  selector:
+    app: vector-collector
+  ports:
+    - name: fluent
+      port: 24224
+      targetPort: 24224
+      protocol: TCP
+---
+# NodePort for external syslog sources (routers, firewalls, servers)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector-syslog
+  namespace: logging
+spec:
+  type: NodePort
+  selector:
+    app: vector-collector
+  ports:
+    - name: syslog-udp
+      port: 514
+      targetPort: 514
+      nodePort: 30514
+      protocol: UDP
+    - name: syslog-tcp
+      port: 514
+      targetPort: 514
+      nodePort: 30515
+      protocol: TCP
+---
+# Vector Aggregator — reads from NATS, writes to Loki for log storage and search
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-aggregator-config
+  namespace: logging
+data:
+  vector.toml: |
+    [api]
+    enabled = true
+    address = "0.0.0.0:8686"
+
+    # Consume logs from NATS JetStream with a durable consumer group
+    [sources.nats_in]
+    type = "nats"
+    url = "nats://nats.logging.svc.cluster.local:4222"
+    subject = "samma.logs.k8s"
+    queue = "vector-aggregator"
+    connection_name = "vector-aggregator"
+
+    [sources.nats_in.decoding]
+    codec = "json"
+
+    # Ensure required Loki label fields exist
+    [transforms.format_loki]
+    type = "remap"
+    inputs = ["nats_in"]
+    source = '''
+      if !exists(.source_type) { .source_type = "unknown" }
+      if !exists(.namespace)   { .namespace   = "unknown" }
+      if !exists(.pod)         { .pod         = "unknown" }
+      if !exists(.container)   { .container   = "unknown" }
+      if !exists(.message) {
+        .message = encode_json(.)
+      }
+    '''
+
+    # Send to Loki
+    [sinks.loki_out]
+    type = "loki"
+    inputs = ["format_loki"]
+    endpoint = "http://loki.logging.svc.cluster.local:3100"
+
+    [sinks.loki_out.encoding]
+    codec = "json"
+
+    [sinks.loki_out.labels]
+    source = "{{ source_type }}"
+    namespace = "{{ namespace }}"
+    pod = "{{ pod }}"
+    container = "{{ container }}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vector-aggregator
+  namespace: logging
+  labels:
+    app: vector-aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vector-aggregator
+  template:
+    metadata:
+      labels:
+        app: vector-aggregator
+    spec:
+      containers:
+        - name: vector
+          image: timberio/vector:0.39.0-distroless-libc
+          args: ["--config", "/etc/vector/vector.toml"]
+          ports:
+            - name: api
+              containerPort: 8686
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: vector-aggregator-config

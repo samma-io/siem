@@ -1,0 +1,151 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: siem
+  namespace: samma
+  labels:
+    app: siem
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: siem
+  template:
+    metadata:
+      labels:
+        app: siem
+    spec:
+      containers:
+        - name: siem
+          image: sammascanner/siem:v0.1
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SIEM_HTTP_PORT
+              value: "8080"
+            - name: SIEM_NATS_URL
+              value: "nats://nats.logging.svc.cluster.local:4222"
+            - name: SIEM_NATS_SUBSCRIBE
+              value: "samma.logs.>"
+            - name: SIEM_RULES_DIR
+              value: "/app/rules"
+          volumeMounts:
+            - name: rules
+              mountPath: /app/rules
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: rules
+          configMap:
+            name: siem-rules
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: siem
+  namespace: samma
+spec:
+  selector:
+    app: siem
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# Vector Alert Sink — subscribes to SIEM alerts on NATS, writes to Loki
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-sink-config
+  namespace: samma
+data:
+  vector.toml: |
+    [api]
+    enabled = true
+    address = "0.0.0.0:8686"
+
+    [sources.nats_alerts]
+    type = "nats"
+    url = "nats://nats.logging.svc.cluster.local:4222"
+    subject = "samma.alerts.>"
+    queue = "alert-sink"
+    connection_name = "alert-sink"
+
+    [sources.nats_alerts.decoding]
+    codec = "json"
+
+    [transforms.parse_alert]
+    type = "remap"
+    inputs = ["nats_alerts"]
+    source = '''
+      .severity  = string(.rule.severity) ?? "unknown"
+      .rule_name = string(.rule.name)     ?? "unknown"
+      .message   = encode_json(.)
+    '''
+
+    [sinks.loki_alerts]
+    type = "loki"
+    inputs = ["parse_alert"]
+    endpoint = "http://loki.logging.svc.cluster.local:3100"
+
+    [sinks.loki_alerts.encoding]
+    codec = "json"
+
+    [sinks.loki_alerts.labels]
+    job = "siem-alerts"
+    severity = "{{ severity }}"
+    rule = "{{ rule_name }}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink
+  namespace: samma
+  labels:
+    app: alert-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-sink
+  template:
+    metadata:
+      labels:
+        app: alert-sink
+    spec:
+      containers:
+        - name: vector
+          image: timberio/vector:0.39.0-distroless-libc
+          args: ["--config", "/etc/vector/vector.toml"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: alert-sink-config

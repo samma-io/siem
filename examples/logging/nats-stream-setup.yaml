@@ -1,0 +1,29 @@
+---
+# One-time Job to create the LOGS stream in NATS JetStream.
+# Re-running is safe — idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-stream-setup
+  namespace: logging
+spec:
+  ttlSecondsAfterFinished: 120
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: nats-cli
+          image: natsio/nats-box:0.14.5
+          command:
+            - sh
+            - -c
+            - |
+              nats stream add LOGS \
+                --server nats://nats.logging.svc.cluster.local:4222 \
+                --subjects "samma.logs.k8s" \
+                --storage file \
+                --retention limits \
+                --max-age 24h \
+                --replicas 1 \
+                --defaults 2>/dev/null || \
+              echo "Stream LOGS already exists or created successfully"
