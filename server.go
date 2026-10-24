@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 )
 
 type Alert struct {
@@ -55,6 +56,7 @@ func StartServer(cfg Config, rules []CompiledRule, nc *NATSClient) {
 		}
 
 		var event map[string]interface{}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
@@ -76,5 +78,13 @@ func StartServer(cfg Config, rules []CompiledRule, nc *NATSClient) {
 
 	addr := ":" + cfg.HTTPPort
 	log.Printf("HTTP server listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           nil,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
