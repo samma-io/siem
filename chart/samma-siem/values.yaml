@@ -1,7 +1,9 @@
-# samma-siem: the foundation of the Kubernetes SIEM. The message contract is
+# samma-siem: the Kubernetes SIEM. The message contract is
 # samma-io/aws-siem docs/contracts/detection-alert-v1.md, "NATS transport",
-# and docs/contracts/nats-transport.md. Workloads (ingester, Vector,
-# detection-engine, alert-destination) come in later chart versions.
+# and docs/contracts/nats-transport.md.
+#
+#   ingester-<source> -> samma.raw.<lane> -> vector -> samma.logs.<lane> ->
+#   detection-engine-<lane> -> samma.alerts.<lane> -> alert-destination -> Postgres
 #
 # Nothing here is exposed outside the cluster: every Service is ClusterIP and
 # the chart renders no Ingress.
@@ -20,11 +22,55 @@
 lanes:
   - workspace
 
-# Ingester sources with a worker consumer ingester-<source> on
-# samma.ingester.slices.<source> (stream INGESTER_SLICES).
+# The ingester: SaaS audit-log puller (samma-io/ingester), one Deployment
+# per source running `daemon` with INGESTER_TRANSPORT=nats. Each source gets
+# a worker consumer ingester-<source> on samma.ingester.slices.<source>
+# (stream INGESTER_SLICES) and publishes to samma.raw.<lane>. Watermarks
+# live in Postgres (ingester_checkpoint, created at start).
+#
+# Only google-workspace works on Kubernetes so far: Slack, 1Password and
+# Cloudflare still read their token from SSM (ingester README, "Running on
+# Kubernetes (NATS)").
 ingester:
+  enabled: true
   sources:
     - google-workspace
+  image: ghcr.io/samma-io/ingester
+  tag: 89ed408
+  digest: ""
+  pullPolicy: IfNotPresent
+  # Defaults for every source; a source's entry in perSource wins.
+  replicas: 0
+  scheduleInterval: 10m
+  reconcileInterval: 1h
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Per source, keyed by the name in sources:
+  #   replicas           at most 1: a second replica only contends for the leases
+  #   scheduleInterval, reconcileInterval
+  #   existingSecret     the source's credential Secret, by name, mounted
+  #                      read-only at /var/run/secrets/ingester
+  #   secretOptional     start without the Secret (true for replicas: 0)
+  #   env                extra INGESTER_* settings of the source (README,
+  #                      "Configuration"); an empty value is left out
+  perSource:
+    google-workspace:
+      # 0 until there is a credential. To go live: create the Secret (key
+      # key.json, a service-account key that may impersonate the delegated
+      # service account), set the two env values, then replicas: 1.
+      replicas: 0
+      existingSecret: ingester-google
+      secretOptional: true
+      env:
+        # The Workspace admin to act as (a dedicated service user with the
+        # Reports privilege) and the service account holding the
+        # domain-wide delegation grant. Required with replicas: 1.
+        INGESTER_GWS_SUBJECT: ""
+        INGESTER_GCP_TARGET_SERVICE_ACCOUNT: ""
 
 # NATS: the official chart (nats-io/k8s) with JetStream on a file store.
 # false installs no NATS; set externalNats.url to use one you run already.
@@ -223,11 +269,107 @@ minio:
   consoleIngress:
     enabled: false
 
-# The existing TimescaleDB, through a Secret with a libpq DSN, e.g. the
+# The existing TimescaleDB, through a Secret with a libpq DSN: the
 # siem-postgres Secret of samma-io/deploy siem/ (database and role "siem",
-# never the scan_results database). The chart deploys no Postgres and
-# nothing reads this yet; the ingester (ingester_checkpoint) and
-# alert-destination (alert_ledger, siem_alerts) will.
+# never the scan_results database). The chart deploys no Postgres and never
+# creates this Secret. The ingester (ingester_checkpoint) and
+# alert-destination (alert_ledger, siem_alerts) mount the key as a file.
 postgres:
-  existingSecret: ""
+  existingSecret: siem-postgres
   dsnKey: dsn
+
+# Shared by the four workloads below. Every pod runs as this non-root uid
+# with a read-only root filesystem, no capabilities, the RuntimeDefault
+# seccomp profile and no service account token.
+workloads:
+  runAsUser: 65532
+  # The images are linux/amd64 only.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  tolerations: []
+  affinity: {}
+  # Pull Secrets, by name, for private ghcr.io packages.
+  imagePullSecrets: []
+  podAnnotations: {}
+
+# Vector (samma-io/vector): samma.raw.<lane> (SIEM_RAW) -> envelope VRL ->
+# samma.logs.<lane> (SIEM_LOGS). One Deployment, rendered when a lane has
+# raw records. The config is baked into the image; the baked
+# vector-k8s.yaml reads the workspace lane (consumer vector-workspace). A
+# raw lane other than workspace needs an image whose config reads it.
+vector:
+  enabled: true
+  image: ghcr.io/samma-io/vector
+  tag: f2f2dea
+  digest: ""
+  pullPolicy: IfNotPresent
+  replicas: 1
+  configPath: /etc/vector/vector-k8s.yaml
+  # Extra env, name: value. NATS_URL is set by the chart.
+  env: {}
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# detection-engine (samma-io/detection-engine): one Deployment per entry in
+# lanes, bound to consumer detection-engine-<lane> on SIEM_LOGS, publishing
+# detection.alert.v1 to samma.alerts.<lane>. The rules are baked into the
+# image (/rules). ENGINE_VISIBILITY_TIMEOUT is consumers.ackWait.detectionEngine.
+#
+# d5d7439 knows the SaaS lanes only. The k8s and scanner lanes (and their
+# rules) are in detection-engine main from 0c5b5ce on; set tag to an image
+# built from there before adding them.
+detectionEngine:
+  enabled: true
+  image: ghcr.io/samma-io/detection-engine
+  tag: d5d7439
+  digest: ""
+  pullPolicy: IfNotPresent
+  replicas: 1
+  workers: 2
+  # Extra env, name: value (e.g. ENGINE_LOG_LEVEL: debug).
+  env: {}
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# alert-destination (samma-io/alert-destination): samma.alerts.> (consumer
+# alert-destination on SIEM_ALERTS) -> routes -> Postgres siem_alerts. Its
+# delivery ledger is the alert_ledger table in the same database.
+alertDestination:
+  enabled: true
+  image: ghcr.io/samma-io/alert-destination
+  tag: 779befa
+  digest: ""
+  pullPolicy: IfNotPresent
+  replicas: 1
+  # ALERTDEST_DAEMON_MESSAGE_TIMEOUT. Must stay below
+  # consumers.ackWait.alertDestination.
+  messageTimeout: 60s
+  # The routing table (ConfigMap <release>-alert-routes, mounted at
+  # ALERTDEST_ROUTES_PATH). Empty: everything to the postgres destination,
+  # table siem_alerts, with require_slack following slack.enabled. Set it to
+  # a whole table (README "Routing table" of alert-destination) to replace it.
+  routes: ""
+  # Slack and GitHub. The nats transport of alert-destination 779befa
+  # builds the postgres destination only and refuses a table that names
+  # slack or github, so leave this off until the image supports them.
+  slack:
+    enabled: false
+  # Secret, by name, with the Slack and GitHub tokens, mounted read-only at
+  # /var/run/secrets/alert-destination. Never put a token in values.
+  existingSecret: ""
+  # Extra env, name: value (e.g. ALERTDEST_LOG_LEVEL: debug).
+  env: {}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi

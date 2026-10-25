@@ -1,0 +1,29 @@
+{{- if .Values.alertDestination.enabled }}
+{{- /*
+The routing table of alert-destination, mounted at ALERTDEST_ROUTES_PATH.
+alertDestination.routes replaces it whole.
+*/ -}}
+{{- $v := .Values.alertDestination }}
+{{- if and $v.slack.enabled (not $v.routes) }}
+{{- fail "alertDestination.slack.enabled needs alertDestination.routes: with require_slack every route must deliver to slack" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "samma-siem.workloadName" (dict "root" . "suffix" "alert-routes") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alert-destination
+data:
+  routes.yaml: |
+    {{- if $v.routes }}
+    {{- $v.routes | nindent 4 }}
+    {{- else }}
+    require_slack: {{ $v.slack.enabled | default false }}
+    routes:
+      - {level: "*", log_source: "*", deliveries: [{to: postgres, target: siem_alerts}]}
+    default:
+      deliveries: [{to: postgres, target: siem_alerts}]
+    {{- end }}
+{{- end }}

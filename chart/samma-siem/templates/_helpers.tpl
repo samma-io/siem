@@ -172,3 +172,104 @@ readOnlyRootFilesystem: true
 capabilities:
   drop: [ALL]
 {{- end -}}
+
+{{- /*
+samma-siem.workloadImage: samma-siem.image for a workload, which must be
+pinned: a tag that is a commit (never latest) or a digest.
+
+  {{ include "samma-siem.workloadImage" (dict "name" "vector" "values" .Values.vector) }}
+*/ -}}
+{{- define "samma-siem.workloadImage" -}}
+{{- $v := .values -}}
+{{- if not $v.image }}{{ fail (printf "%s.image is required" .name) }}{{ end -}}
+{{- if and (not $v.digest) (or (not $v.tag) (eq (toString $v.tag) "latest")) -}}
+{{- fail (printf "%s.tag must be an image tag like a commit sha, never latest (or set %s.digest)" .name .name) -}}
+{{- end -}}
+{{- include "samma-siem.image" (dict "image" $v.image "tag" (toString ($v.tag | default "")) "digest" $v.digest) -}}
+{{- end -}}
+
+{{- /*
+samma-siem.workloadName: <fullname>-<suffix>, at most 63 characters, so it
+is also a valid Service name.
+*/ -}}
+{{- define "samma-siem.workloadName" -}}
+{{- printf "%s-%s" (include "samma-siem.fullname" .root) .suffix | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- /*
+samma-siem.selectorLabels: the immutable selector of a workload, from
+component (detection-engine) and an optional lane or source.
+
+  {{ include "samma-siem.selectorLabels" (dict "root" $ "component" "ingester" "instance" "google-workspace") }}
+*/ -}}
+{{- define "samma-siem.selectorLabels" -}}
+app.kubernetes.io/name: {{ .root.Chart.Name }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+app.kubernetes.io/component: {{ .component }}
+{{- with .instance }}
+siem.samma.io/instance: {{ . }}
+{{- end }}
+{{- end -}}
+
+{{- /*
+samma-siem.workloadPodSpec: the pod-level fields every workload shares:
+scheduling, pull Secrets, no service account token and the hardened pod
+security context.
+*/ -}}
+{{- define "samma-siem.workloadPodSpec" -}}
+{{- $w := .Values.workloads -}}
+automountServiceAccountToken: false
+{{- with $w.imagePullSecrets }}
+imagePullSecrets:
+  {{- range . }}
+  - name: {{ if kindIs "map" . }}{{ .name }}{{ else }}{{ . }}{{ end }}
+  {{- end }}
+{{- end }}
+{{- with $w.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $w.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $w.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+securityContext:
+  {{- include "samma-siem.podSecurity" $w | nindent 2 }}
+{{- end -}}
+
+{{- /*
+samma-siem.extraEnv renders a name: value map as env entries, sorted, and
+leaves out empty values. A name the chart sets itself is refused.
+
+  {{ include "samma-siem.extraEnv" (dict "env" .Values.vector.env "reserved" (list "NATS_URL") "what" "vector.env") }}
+*/ -}}
+{{- define "samma-siem.extraEnv" -}}
+{{- $env := .env | default dict -}}
+{{- range $name := keys $env | sortAlpha }}
+{{- if has $name $.reserved }}{{ fail (printf "%s.%s is set by the chart" $.what $name) }}{{ end -}}
+{{- $value := get $env $name -}}
+{{- if not (eq (toString $value) "") }}
+- name: {{ $name }}
+  value: {{ toString $value | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{- /*
+samma-siem.postgresSecret: postgres.existingSecret, required by the
+workloads that keep state in Postgres.
+*/ -}}
+{{- define "samma-siem.postgresSecret" -}}
+{{- required "postgres.existingSecret (a Secret with the DSN of the siem database) is required by the ingester and alert-destination" .Values.postgres.existingSecret -}}
+{{- end -}}
+
+{{- /*
+samma-siem.seconds: a duration like 60s or 2m in whole seconds.
+*/ -}}
+{{- define "samma-siem.seconds" -}}
+{{- div (include "samma-siem.nanos" .) 1000000000 -}}
+{{- end -}}

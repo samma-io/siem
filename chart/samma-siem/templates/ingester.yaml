@@ -1,0 +1,115 @@
+{{- if .Values.ingester.enabled }}
+{{- /*
+One ingester per source, running `daemon` (schedule, reconcile and worker in
+one process): slices on samma.ingester.slices.<source> (consumer
+ingester-<source> on INGESTER_SLICES), records to samma.raw.<lane>,
+watermarks in Postgres.
+*/ -}}
+{{- $v := .Values.ingester -}}
+{{- $image := include "samma-siem.workloadImage" (dict "name" "ingester" "values" $v) -}}
+{{- $nats := include "samma-siem.natsUrl" . -}}
+{{- $rawLanes := list -}}
+{{- range include "samma-siem.lanes" . | fromJsonArray }}{{ if .raw }}{{ $rawLanes = append $rawLanes .name }}{{ end }}{{ end -}}
+{{- $reserved := list "INGESTER_TRANSPORT" "INGESTER_SOURCE" "INGESTER_MODE" "INGESTER_NATS_URL" "INGESTER_POSTGRES_DSN_FILE" "INGESTER_SCHEDULE_INTERVAL" "INGESTER_RECONCILE_INTERVAL" "INGESTER_SLICE_STREAM" "INGESTER_SLICE_CONSUMER" "INGESTER_SLICE_SUBJECT" "INGESTER_RAW_SUBJECT" "GOOGLE_APPLICATION_CREDENTIALS" -}}
+{{- range $source := $v.sources }}
+{{- $source = toString $source }}
+{{- $cfg := mergeOverwrite (dict "replicas" $v.replicas "scheduleInterval" $v.scheduleInterval "reconcileInterval" $v.reconcileInterval "existingSecret" "" "secretOptional" false "env" dict) (deepCopy (get ($v.perSource | default dict) $source | default dict)) }}
+{{- $lane := eq $source "google-workspace" | ternary "workspace" $source }}
+{{- if not (has $lane $rawLanes) }}
+{{- fail (printf "ingester source %s publishes to samma.raw.%s: add lane %s (with raw records) to lanes" $source $lane $lane) }}
+{{- end }}
+{{- $replicas := $cfg.replicas | int }}
+{{- if gt $replicas 1 }}
+{{- fail (printf "ingester.perSource.%s.replicas: at most 1, a second replica only contends for the same leases" $source) }}
+{{- end }}
+{{- if and (gt $replicas 0) (eq $source "google-workspace") }}
+{{- if not $cfg.existingSecret }}{{ fail "ingester.perSource.google-workspace.existingSecret (key key.json) is required with replicas: 1" }}{{ end }}
+{{- range $k := list "INGESTER_GWS_SUBJECT" "INGESTER_GCP_TARGET_SERVICE_ACCOUNT" }}
+{{- if not (get $cfg.env $k) }}{{ fail (printf "ingester.perSource.google-workspace.env.%s is required with replicas: 1" $k) }}{{ end }}
+{{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "samma-siem.workloadName" (dict "root" $ "suffix" (printf "ingester-%s" $source)) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: ingester
+    siem.samma.io/instance: {{ $source }}
+spec:
+  replicas: {{ $replicas }}
+  # Never two at once: they would contend for the same leases.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" $ "component" "ingester" "instance" $source) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: ingester
+        siem.samma.io/instance: {{ $source }}
+      {{- with $.Values.workloads.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" $ | nindent 6 }}
+      # A slice in flight is safe to abandon: it is redelivered after AckWait.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: ingester
+          image: {{ $image }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          args: [daemon]
+          env:
+            - name: INGESTER_TRANSPORT
+              value: nats
+            - name: INGESTER_SOURCE
+              value: {{ $source | quote }}
+            - name: INGESTER_NATS_URL
+              value: {{ $nats | quote }}
+            - name: INGESTER_POSTGRES_DSN_FILE
+              value: /var/run/secrets/siem-postgres/dsn
+            {{- if and $cfg.existingSecret (eq $source "google-workspace") }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/run/secrets/ingester/key.json
+            {{- end }}
+            - name: INGESTER_SCHEDULE_INTERVAL
+              value: {{ $cfg.scheduleInterval | quote }}
+            - name: INGESTER_RECONCILE_INTERVAL
+              value: {{ $cfg.reconcileInterval | quote }}
+            {{- with include "samma-siem.extraEnv" (dict "env" $cfg.env "reserved" $reserved "what" (printf "ingester.perSource.%s.env" $source)) | trim }}{{ . | nindent 12 }}{{ end }}
+          securityContext:
+            {{- include "samma-siem.containerSecurity" $ | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: postgres
+              mountPath: /var/run/secrets/siem-postgres
+              readOnly: true
+            {{- if $cfg.existingSecret }}
+            - name: credentials
+              mountPath: /var/run/secrets/ingester
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: postgres
+          secret:
+            secretName: {{ include "samma-siem.postgresSecret" $ }}
+            items:
+              - key: {{ $.Values.postgres.dsnKey }}
+                path: dsn
+        {{- if $cfg.existingSecret }}
+        - name: credentials
+          secret:
+            secretName: {{ $cfg.existingSecret }}
+            {{- if $cfg.secretOptional }}
+            optional: true
+            {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

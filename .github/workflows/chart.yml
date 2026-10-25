@@ -32,10 +32,14 @@ jobs:
           helm dependency build chart/samma-siem
 
       - name: helm lint
-        run: helm lint --strict chart/samma-siem
+        run: |
+          helm lint --strict chart/samma-siem
+          helm lint --strict chart/samma-siem -f chart/samma-siem/ci/all-lanes-values.yaml
 
       - name: helm template
-        run: helm template ci chart/samma-siem --namespace samma > /dev/null
+        run: |
+          helm template ci chart/samma-siem --namespace samma > /dev/null
+          helm template ci chart/samma-siem --namespace samma -f chart/samma-siem/ci/all-lanes-values.yaml > /dev/null
 
-      - name: streams and consumers in the render
+      - name: streams, consumers and workloads in the render
         run: hack/check-chart.sh chart/samma-siem

@@ -1,0 +1,94 @@
+{{- if .Values.alertDestination.enabled }}
+{{- /*
+alert-destination: samma.alerts.> (consumer alert-destination on
+SIEM_ALERTS) -> routing table -> Postgres. The ledger is alert_ledger in the
+same database; both tables are created at start.
+*/ -}}
+{{- $v := .Values.alertDestination -}}
+{{- $timeout := include "samma-siem.nanos" $v.messageTimeout | int64 -}}
+{{- $ackWait := include "samma-siem.nanos" .Values.consumers.ackWait.alertDestination | int64 -}}
+{{- if ge $timeout $ackWait -}}
+{{- fail (printf "alertDestination.messageTimeout (%s) must be below consumers.ackWait.alertDestination (%s)" $v.messageTimeout .Values.consumers.ackWait.alertDestination) -}}
+{{- end -}}
+{{- $reserved := list "ALERTDEST_TRANSPORT" "ALERTDEST_NATS_URL" "ALERTDEST_NATS_STREAM" "ALERTDEST_NATS_CONSUMER" "ALERTDEST_POSTGRES_DSN" "ALERTDEST_POSTGRES_DSN_FILE" "ALERTDEST_ROUTES_PATH" "ALERTDEST_ROUTES_PARAM" "ALERTDEST_DAEMON_MESSAGE_TIMEOUT" -}}
+{{- $routes := include "samma-siem.workloadName" (dict "root" . "suffix" "alert-routes") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "samma-siem.workloadName" (dict "root" . "suffix" "alert-destination") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alert-destination
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "alert-destination") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: alert-destination
+      annotations:
+        # The table is read once at start: a change rolls the pods.
+        checksum/routes: {{ include (print $.Template.BasePath "/alert-routes-configmap.yaml") . | sha256sum }}
+        {{- with .Values.workloads.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" . | nindent 6 }}
+      # Above the message timeout, so an alert in flight can finish.
+      terminationGracePeriodSeconds: {{ add (include "samma-siem.seconds" $v.messageTimeout) 10 }}
+      containers:
+        - name: alert-destination
+          image: {{ include "samma-siem.workloadImage" (dict "name" "alertDestination" "values" $v) }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          env:
+            - name: ALERTDEST_TRANSPORT
+              value: nats
+            - name: ALERTDEST_NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            - name: ALERTDEST_NATS_STREAM
+              value: SIEM_ALERTS
+            - name: ALERTDEST_NATS_CONSUMER
+              value: alert-destination
+            - name: ALERTDEST_POSTGRES_DSN_FILE
+              value: /var/run/secrets/siem-postgres/dsn
+            - name: ALERTDEST_ROUTES_PATH
+              value: /etc/alert-destination/routes.yaml
+            - name: ALERTDEST_DAEMON_MESSAGE_TIMEOUT
+              value: {{ $v.messageTimeout | quote }}
+            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" $reserved "what" "alertDestination.env") | trim }}{{ . | nindent 12 }}{{ end }}
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: routes
+              mountPath: /etc/alert-destination
+              readOnly: true
+            - name: postgres
+              mountPath: /var/run/secrets/siem-postgres
+              readOnly: true
+            {{- if $v.existingSecret }}
+            - name: tokens
+              mountPath: /var/run/secrets/alert-destination
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: routes
+          configMap:
+            name: {{ $routes }}
+        - name: postgres
+          secret:
+            secretName: {{ include "samma-siem.postgresSecret" . }}
+            items:
+              - key: {{ .Values.postgres.dsnKey }}
+                path: dsn
+        {{- if $v.existingSecret }}
+        - name: tokens
+          secret:
+            secretName: {{ $v.existingSecret }}
+        {{- end }}
+{{- end }}
