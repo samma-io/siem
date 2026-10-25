@@ -153,6 +153,15 @@ check_workload ci-samma-siem-siem-storage \
   'value: "http://ci-minio.samma.svc:9000"' 'value: "samma-siem-archive"' 'value: "5m"' \
   'name: ci-minio' 'key: rootUser' 'key: rootPassword' 'path: /healthz'
 grep -qF -- '- name: STORAGE_NATS_SUBSCRIBE' <<<"$out" && fail "siem-storage creates its own consumer"
+# Without quickwit.enabled Vector runs its base config only, and without
+# alertDestination.existingSecret alert-destination has no token files.
+vec=$(doc ci-samma-siem-vector Deployment)
+grep -qF 'QUICKWIT_URL' <<<"$vec" && fail "vector has QUICKWIT_URL without quickwit.enabled"
+grep -qF 'vector-k8s-quickwit' <<<"$vec" && fail "vector has a Quickwit overlay without quickwit.enabled"
+ad=$(doc ci-samma-siem-alert-destination Deployment)
+grep -qF '_TOKEN_FILE' <<<"$ad" && fail "alert-destination has token files without existingSecret"
+grep -qF '/var/run/secrets/alert-destination' <<<"$ad" && fail "alert-destination mounts tokens without existingSecret"
+
 # The storage consumers: every lane's log subject, and the S3 AckWait above
 # the 5m flush interval (6m) with the service's max_ack_pending.
 cons() { grep -A12 -F "consumer.$1.json:" <<<"$out"; }
@@ -174,8 +183,10 @@ out=$(render --set storage.enabled=false)
 consumers | grep -q storage && fail "storage consumers without storage"
 deployments | grep -q siem-storage && fail "siem-storage rendered while disabled"
 
-# Everything on: storage, Quickwit and Grafana with every lane.
-out=$(render -f "$chart/ci/all-enabled-values.yaml")
+# Everything on: storage, Quickwit and Grafana with every lane, Vector into
+# Quickwit, Slack and GitHub routes.
+all_values=(-f "$chart/ci/all-enabled-values.yaml")
+out=$(render "${all_values[@]}")
 want_deps=$(printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-detection-engine-k8s \
   ci-samma-siem-detection-engine-scanner ci-samma-siem-detection-engine-workspace ci-samma-siem-grafana \
   ci-samma-siem-ingester-google-workspace ci-samma-siem-quickwit ci-samma-siem-siem-storage ci-samma-siem-vector | sort)
@@ -187,7 +198,7 @@ want_svcs=$(printf '%s\n' ci-samma-siem-detection-engine-k8s ci-samma-siem-detec
 want_cons=$(printf '%s\n' SIEM_ALERTS.alert-destination SIEM_ALERTS.storage-s3-alerts \
   SIEM_LOGS.detection-engine-workspace SIEM_LOGS.detection-engine-k8s SIEM_LOGS.detection-engine-scanner \
   SIEM_LOGS.storage-logs SIEM_LOGS.storage-s3-logs SIEM_RAW.vector-workspace \
-  INGESTER_SLICES.ingester-google-workspace | sort)
+  SIEM_ALERTS.vector-alerts-quickwit INGESTER_SLICES.ingester-google-workspace | sort)
 [ "$(consumers)" = "$want_cons" ] || fail "all-enabled consumers: $(consumers | tr '\n' ' ')"
 lanes='["samma.logs.workspace","samma.logs.k8s","samma.logs.scanner"]'
 grep -qF "\"filter_subjects\": $lanes" <<<"$(cons SIEM_LOGS.storage-logs)" || fail "storage-logs lacks a lane"
@@ -210,6 +221,41 @@ for svc in ci-samma-siem-quickwit ci-samma-siem-grafana; do
   grep -qF 'type: ClusterIP' <<<"$(doc $svc Service)" || fail "Service $svc is not ClusterIP"
 done
 grep -qF 'values: [grafana, vector]' <<<"$(doc ci-samma-siem-quickwit NetworkPolicy)" || fail "no Quickwit NetworkPolicy"
+# Vector into Quickwit: both overlays after the base config, QUICKWIT_URL the
+# REST base without /api/v1, and the alerts consumer for its overlay.
+check_workload ci-samma-siem-vector "$nats" \
+  'args: [--config, "/etc/vector/vector-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit.yaml", --config, "/etc/vector/vector-k8s-quickwit-alerts.yaml"]' \
+  '- name: QUICKWIT_URL
+              value: "http://ci-samma-siem-quickwit.samma.svc:7280"'
+grep -qF '"filter_subject": "samma.alerts.>"' <<<"$(cons SIEM_ALERTS.vector-alerts-quickwit)" || fail "vector-alerts-quickwit filter"
+grep -qF '"durable_name": "vector-alerts-quickwit"' <<<"$(cons SIEM_ALERTS.vector-alerts-quickwit)" || fail "vector-alerts-quickwit name"
+grep -qF '"ack_wait": 120000000000' <<<"$(cons SIEM_ALERTS.vector-alerts-quickwit)" || fail "vector-alerts-quickwit AckWait"
+# Slack and GitHub routed: both token files, from the whole Secret.
+check_workload ci-samma-siem-alert-destination \
+  '- name: ALERTDEST_SLACK_TOKEN_FILE
+              value: /var/run/secrets/alert-destination/slack-token' \
+  '- name: ALERTDEST_GITHUB_TOKEN_FILE
+              value: /var/run/secrets/alert-destination/github-token' \
+  'mountPath: /var/run/secrets/alert-destination' 'secretName: siem-alert-destination'
+grep -qE '^ *subPath:' <<<"$(doc ci-samma-siem-alert-destination Deployment)" && fail "the token Secret is mounted by subPath"
+grep -qF '{to: slack, target: C0EXAMPLE1}' <<<"$(doc ci-samma-siem-alert-routes ConfigMap)" || fail "the all-enabled routes do not reach slack"
+
+# Quickwit without vector.quickwitAlerts: the logs overlay only, no consumer.
+out=$(render "${all_values[@]}" --set vector.quickwitAlerts=false)
+check_workload ci-samma-siem-vector \
+  'args: [--config, "/etc/vector/vector-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit.yaml"]' \
+  'value: "http://ci-samma-siem-quickwit.samma.svc:7280"'
+consumers | grep -q vector-alerts-quickwit && fail "vector-alerts-quickwit without vector.quickwitAlerts"
+# vector.quickwitAlerts with no Vector (no raw lane): no consumer either.
+out=$(render "${all_values[@]}" --set 'lanes[0].name=k8s' --set 'lanes[0].raw=false' --set-json 'lanes[1]={"name":"scanner","raw":false}' --set ingester.enabled=false)
+deployments | grep -q vector && fail "vector rendered without a raw lane"
+consumers | grep -q vector-alerts-quickwit && fail "vector-alerts-quickwit without a Vector"
+
+# existingSecret with the default postgres-only table: both files are set
+# (alert-destination ignores the unrouted ones), nothing is refused.
+out=$(render --set alertDestination.existingSecret=tokens)
+check_workload ci-samma-siem-alert-destination \
+  '- name: ALERTDEST_SLACK_TOKEN_FILE' '- name: ALERTDEST_GITHUB_TOKEN_FILE' 'secretName: tokens' 
 grep -qE '^kind: Ingress' <<<"$out" && fail "all-enabled render contains an Ingress"
 grep -qE 'type: (NodePort|LoadBalancer)' <<<"$out" && fail "all-enabled render exposes a Service outside the cluster"
 
@@ -284,5 +330,41 @@ render "${all[@]}" --set grafana.existingSecret=siem-postgres >/dev/null 2>&1 &&
 render "${all[@]}" --set grafana.existingSecret=pg --set postgres.existingSecret=pg >/dev/null 2>&1 && fail "grafana rendered with postgres.existingSecret"
 render "${all[@]}" --set-json 'grafana.env={"QUICKWIT_URL":"http://x"}' >/dev/null 2>&1 && fail "QUICKWIT_URL was overridden through env"
 render "${all[@]}" >/dev/null || fail "the all-enabled values do not render"
+
+# Slack/GitHub tokens and Vector's Quickwit overlays: refusals.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cat >"$tmp/slack-routes.yaml" <<'YAML'
+routes:
+  - {level: "*", log_source: "*", deliveries: [{to: postgres, target: siem_alerts}, {to: slack, target: C0X}]}
+default:
+  deliveries: [{to: postgres, target: siem_alerts}, {to: slack, target: C0X}]
+YAML
+cat >"$tmp/github-default.yaml" <<'YAML'
+require_slack: false
+routes: []
+default:
+  deliveries: [{to: github, target: o/r}]
+YAML
+slack=(--set-file "alertDestination.routes=$tmp/slack-routes.yaml")
+github=(--set-file "alertDestination.routes=$tmp/github-default.yaml")
+# The tables themselves render with the Secret, so a refusal below is the
+# missing Secret's and not a typo in the table.
+render "${slack[@]}" --set alertDestination.existingSecret=t >/dev/null || fail "a slack route with existingSecret does not render"
+render "${github[@]}" --set alertDestination.existingSecret=t >/dev/null || fail "a github default with existingSecret does not render"
+render "${slack[@]}" --set alertDestination.slack.enabled=true --set alertDestination.existingSecret=t >/dev/null || fail "slack.enabled with routes and existingSecret does not render"
+render "${all[@]}" --set alertDestination.existingSecret= >/dev/null 2>&1 && fail "slack and github routes rendered without existingSecret"
+render "${slack[@]}" >/dev/null 2>&1 && fail "a slack route rendered without existingSecret"
+render "${github[@]}" >/dev/null 2>&1 && fail "a github default rendered without existingSecret"
+render "${slack[@]}" --set alertDestination.slack.enabled=true >/dev/null 2>&1 && fail "slack.enabled rendered without existingSecret"
+printf 'routes: [\n' >"$tmp/bad-routes.yaml"
+render --set-file "alertDestination.routes=$tmp/bad-routes.yaml" >/dev/null 2>&1 && fail "a routes table that is not YAML rendered"
+for v in ALERTDEST_SLACK_TOKEN_FILE ALERTDEST_GITHUB_TOKEN_FILE; do
+  render --set alertDestination.existingSecret=t --set-json "alertDestination.env={\"$v\":\"/x\"}" >/dev/null 2>&1 && fail "$v was overridden through env"
+done
+render --set vector.quickwitAlerts=true >/dev/null 2>&1 && fail "vector.quickwitAlerts rendered without quickwit.enabled"
+render --set vector.quickwitAlerts=true --set streams.enabled=false >/dev/null 2>&1 && fail "vector.quickwitAlerts rendered without quickwit.enabled (no streams)"
+render "${all[@]}" --set-json 'vector.env={"QUICKWIT_URL":"http://x"}' >/dev/null 2>&1 && fail "QUICKWIT_URL was overridden through vector.env"
+render --set-json 'vector.env={"QUICKWIT_URL":"http://x"}' >/dev/null 2>&1 && fail "QUICKWIT_URL was set through vector.env without quickwit"
 
 echo "chart render checks passed"

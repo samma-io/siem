@@ -8,6 +8,20 @@ records. The config is baked into the image; this selects it.
 {{- range include "samma-siem.lanes" . | fromJsonArray }}{{ if .raw }}{{ $raw = append $raw .name }}{{ end }}{{ end -}}
 {{- if $raw }}
 {{- $v := .Values.vector }}
+{{- /*
+With quickwit.enabled the overlays of the image feed this release's
+Quickwit: vector-k8s-quickwit.yaml (logs-saas, best-effort) and, with
+vector.quickwitAlerts, vector-k8s-quickwit-alerts.yaml (alerts, consumer
+vector-alerts-quickwit on SIEM_ALERTS, created by the streams Job).
+*/}}
+{{- $alerts := include "samma-siem.vectorQuickwitAlerts" . }}
+{{- $config := list $v.configPath }}
+{{- if .Values.quickwit.enabled }}
+{{- $config = append $config "/etc/vector/vector-k8s-quickwit.yaml" }}
+{{- if $alerts }}
+{{- $config = append $config "/etc/vector/vector-k8s-quickwit-alerts.yaml" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,11 +55,16 @@ spec:
         - name: vector
           image: {{ include "samma-siem.workloadImage" (dict "name" "vector" "values" $v) }}
           imagePullPolicy: {{ $v.pullPolicy }}
-          args: [--config, {{ $v.configPath | quote }}]
+          args: [{{ range $i, $c := $config }}{{ if $i }}, {{ end }}--config, {{ $c | quote }}{{ end }}]
           env:
             - name: NATS_URL
               value: {{ include "samma-siem.natsUrl" . | quote }}
-            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" (list "NATS_URL") "what" "vector.env") | trim }}{{ . | nindent 12 }}{{ end }}
+            {{- if .Values.quickwit.enabled }}
+            # The REST base, without /api/v1: the overlays add the path.
+            - name: QUICKWIT_URL
+              value: {{ include "samma-siem.quickwitUrl" . | quote }}
+            {{- end }}
+            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" (list "NATS_URL" "QUICKWIT_URL") "what" "vector.env") | trim }}{{ . | nindent 12 }}{{ end }}
           ports:
             - name: api
               containerPort: 8686

@@ -23,7 +23,7 @@ Workloads (Postgres DSN from Secret {{ .Values.postgres.existingSecret | default
 {{- end }}
 {{- $raw := list }}{{ range $lanes }}{{ if .raw }}{{ $raw = append $raw .name }}{{ end }}{{ end }}
 {{- if and .Values.vector.enabled $raw }}
-  vector ({{ join ", " $raw }})
+  vector ({{ join ", " $raw }}){{ if .Values.quickwit.enabled }} -> quickwit logs-saas{{ if include "samma-siem.vectorQuickwitAlerts" . }}, alerts{{ end }}{{ end }}
 {{- end }}
 {{- if .Values.detectionEngine.enabled }}
 {{- range $lanes }}
@@ -31,7 +31,7 @@ Workloads (Postgres DSN from Secret {{ .Values.postgres.existingSecret | default
 {{- end }}
 {{- end }}
 {{- if .Values.alertDestination.enabled }}
-  alert-destination -> siem_alerts
+  alert-destination -> siem_alerts{{ with include "samma-siem.alertTokenDestinations" . | fromJsonArray }}, {{ join ", " . }} (tokens from Secret {{ $.Values.alertDestination.existingSecret }}){{ end }}
 {{- end }}
 {{- if .Values.storage.enabled }}
   siem-storage ({{ join ", " (include "samma-siem.storageBackends" . | fromJsonArray) }})

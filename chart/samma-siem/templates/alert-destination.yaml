@@ -10,7 +10,16 @@ same database; both tables are created at start.
 {{- if ge $timeout $ackWait -}}
 {{- fail (printf "alertDestination.messageTimeout (%s) must be below consumers.ackWait.alertDestination (%s)" $v.messageTimeout .Values.consumers.ackWait.alertDestination) -}}
 {{- end -}}
-{{- $reserved := list "ALERTDEST_TRANSPORT" "ALERTDEST_NATS_URL" "ALERTDEST_NATS_STREAM" "ALERTDEST_NATS_CONSUMER" "ALERTDEST_POSTGRES_DSN" "ALERTDEST_POSTGRES_DSN_FILE" "ALERTDEST_ROUTES_PATH" "ALERTDEST_ROUTES_PARAM" "ALERTDEST_DAEMON_MESSAGE_TIMEOUT" -}}
+{{- $reserved := list "ALERTDEST_TRANSPORT" "ALERTDEST_NATS_URL" "ALERTDEST_NATS_STREAM" "ALERTDEST_NATS_CONSUMER" "ALERTDEST_POSTGRES_DSN" "ALERTDEST_POSTGRES_DSN_FILE" "ALERTDEST_ROUTES_PATH" "ALERTDEST_ROUTES_PARAM" "ALERTDEST_DAEMON_MESSAGE_TIMEOUT" "ALERTDEST_SLACK_TOKEN_FILE" "ALERTDEST_GITHUB_TOKEN_FILE" -}}
+{{- /*
+Slack and GitHub tokens come from files, keys slack-token and github-token
+of alertDestination.existingSecret. A table that routes to either without
+that Secret would refuse to start, so the chart refuses it first.
+*/ -}}
+{{- $tokenDests := include "samma-siem.alertTokenDestinations" . | fromJsonArray -}}
+{{- if and $tokenDests (not $v.existingSecret) -}}
+{{- fail (printf "alertDestination routes to %s (alertDestination.routes or slack.enabled) and needs alertDestination.existingSecret: a Secret with the keys slack-token and github-token, mounted at /var/run/secrets/alert-destination" (join " and " $tokenDests)) -}}
+{{- end -}}
 {{- $routes := include "samma-siem.workloadName" (dict "root" . "suffix" "alert-routes") }}
 apiVersion: apps/v1
 kind: Deployment
@@ -61,6 +70,15 @@ spec:
               value: /etc/alert-destination/routes.yaml
             - name: ALERTDEST_DAEMON_MESSAGE_TIMEOUT
               value: {{ $v.messageTimeout | quote }}
+            {{- if $v.existingSecret }}
+            # Both, whatever the table routes to: alert-destination builds
+            # Slack or GitHub only when a route names it and ignores the
+            # other file, so an unrouted key may be missing from the Secret.
+            - name: ALERTDEST_SLACK_TOKEN_FILE
+              value: /var/run/secrets/alert-destination/slack-token
+            - name: ALERTDEST_GITHUB_TOKEN_FILE
+              value: /var/run/secrets/alert-destination/github-token
+            {{- end }}
             {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" $reserved "what" "alertDestination.env") | trim }}{{ . | nindent 12 }}{{ end }}
           securityContext:
             {{- include "samma-siem.containerSecurity" . | nindent 12 }}
@@ -74,6 +92,8 @@ spec:
               mountPath: /var/run/secrets/siem-postgres
               readOnly: true
             {{- if $v.existingSecret }}
+            # The whole Secret, never a subPath, so a rotated token reaches
+            # the file and is picked up without a restart.
             - name: tokens
               mountPath: /var/run/secrets/alert-destination
               readOnly: true
