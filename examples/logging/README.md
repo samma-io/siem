@@ -1,5 +1,13 @@
 # Logging Stack + SIEM on Kubernetes (Talos Linux)
 
+> [!WARNING]
+> **Deprecated.** This example deploys the legacy custom YAML rule engine, which
+> is deprecated. For a new deployment use
+> [`chart/samma-siem`](../../chart/samma-siem/README.md) with
+> [samma-io/detection-engine](https://github.com/samma-io/detection-engine)
+> (Sigma rules, lanes `k8s` and `scanner`). This example is kept only for
+> existing deployments until they are cut over, and will be removed with the engine.
+
 A complete, production-ready logging pipeline that collects all container logs from a Kubernetes cluster, stores them in Loki for search, and feeds them through the Samma SIEM for real-time threat detection and compliance alerting.
 
 ## Architecture
