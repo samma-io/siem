@@ -29,6 +29,26 @@ siem/00-streams-job.yaml creates, so this chart and that Job agree.
 {{- range .Values.ingester.sources -}}
 {{- if not (regexMatch "^[a-z0-9]+(-[a-z0-9]+)*$" (toString .)) }}{{ fail (printf "ingester source %q: a lowercase name like google-workspace" (toString .)) }}{{ end -}}
 {{- $consumers = append $consumers (dict "stream" "INGESTER_SLICES" "name" (printf "ingester-%s" .) "filter" (printf "samma.ingester.slices.%s" .) "ackWait" $c.ackWait.ingester) -}}
+{{- end -}}
+{{- /*
+siem-storage: storage-logs for the postgres backend, storage-s3-logs and
+storage-s3-alerts for s3. The two on SIEM_LOGS filter on every lane's log
+subject. The S3 consumers hold messages unacked until their object is
+written, so they get the service's own max_ack_pending of 10000.
+*/ -}}
+{{- if .Values.storage.enabled -}}
+{{- $backends := include "samma-siem.storageBackends" . | fromJsonArray -}}
+{{- if has "postgres" $backends -}}
+{{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" "storage-logs" "filters" $logs "ackWait" $c.ackWait.storage) -}}
+{{- end -}}
+{{- if has "s3" $backends -}}
+{{- $flush := include "samma-siem.nanos" .Values.storage.s3.flushInterval | int64 -}}
+{{- if le (include "samma-siem.nanos" $c.ackWait.storageS3Logs | int64) $flush -}}
+{{- fail (printf "consumers.ackWait.storageS3Logs (%s) must exceed storage.s3.flushInterval (%s)" $c.ackWait.storageS3Logs .Values.storage.s3.flushInterval) -}}
+{{- end -}}
+{{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" "storage-s3-logs" "filters" $logs "ackWait" $c.ackWait.storageS3Logs "maxAckPending" 10000) -}}
+{{- $consumers = append $consumers (dict "stream" "SIEM_ALERTS" "name" "storage-s3-alerts" "filter" "samma.alerts.>" "ackWait" $c.ackWait.storageS3Alerts "maxAckPending" 10000) -}}
+{{- end -}}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap
@@ -68,13 +88,17 @@ data:
   consumer.{{ .stream }}.{{ .name }}.json: |
     {
       "durable_name": {{ .name | quote }},
+      {{- if .filters }}
+      "filter_subjects": {{ .filters | toJson | replace "\\u003e" ">" }},
+      {{- else }}
       "filter_subject": {{ .filter | quote }},
+      {{- end }}
       "ack_policy": "explicit",
       "ack_wait": {{ include "samma-siem.nanos" .ackWait }},
       "max_deliver": {{ $c.maxDeliver | int }},
       "deliver_policy": "all",
       "replay_policy": "instant",
-      "max_ack_pending": 1000,
+      "max_ack_pending": {{ .maxAckPending | default 1000 | int }},
       "max_waiting": 512
     }
   {{- end }}

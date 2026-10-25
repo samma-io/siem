@@ -33,6 +33,20 @@ Workloads (Postgres DSN from Secret {{ .Values.postgres.existingSecret | default
 {{- if .Values.alertDestination.enabled }}
   alert-destination -> siem_alerts
 {{- end }}
+{{- if .Values.storage.enabled }}
+  siem-storage ({{ join ", " (include "samma-siem.storageBackends" . | fromJsonArray) }})
+{{- end }}
+{{- if .Values.quickwit.enabled }}
+  quickwit     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "samma-siem.workloadName" (dict "root" . "suffix" "quickwit") }} 7280:7280
+               then http://localhost:7280/ui/search
+{{- end }}
+{{- if .Values.grafana.enabled }}
+  grafana      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "samma-siem.workloadName" (dict "root" . "suffix" "grafana") }} 3000:3000
+               then http://localhost:3000 (admin password in Secret {{ .Values.grafana.existingSecret }})
+{{- if not .Values.quickwit.enabled }}
+               quickwit.enabled is false: its Quickwit datasources have nothing to reach.
+{{- end }}
+{{- end }}
 
 The workloads wait for their consumers: until the streams Job has run they
 restart. Every Service is ClusterIP; the chart creates no Ingress.

@@ -1,0 +1,165 @@
+{{- if .Values.grafana.enabled }}
+{{- /*
+Grafana with the Kubernetes provisioning tree of samma-io/grafana: the
+Quickwit datasources at this release's quickwit Service and the siem_alerts
+table through a read-only login from grafana.existingSecret. Nothing
+persists; the data directory is an emptyDir.
+*/ -}}
+{{- $v := .Values.grafana -}}
+{{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "grafana") -}}
+{{- if not (or $v.tag $v.digest) -}}
+{{- fail "grafana.tag is required with grafana.enabled: the image is built and pushed by hand (aws-siem hack/build-images.sh, chart README \"Images built by hand\") from samma-io/grafana with provisioning-k8s (samma-io/grafana#3), so there is no default" -}}
+{{- end -}}
+{{- $image := include "samma-siem.workloadImage" (dict "name" "grafana" "values" $v) -}}
+{{- $secret := required "grafana.existingSecret (a Secret with the Grafana admin password and a read-only Postgres login) is required with grafana.enabled" $v.existingSecret -}}
+{{- if eq $secret (toString .Values.postgres.existingSecret) -}}
+{{- fail (printf "grafana.existingSecret must not be postgres.existingSecret (%s): that is the role that writes the tables. Give Grafana a read-only login of its own (README, \"Grafana\")" $secret) -}}
+{{- end -}}
+{{- $k := $v.keys -}}
+{{- $reserved := list "GF_PATHS_PROVISIONING" "GF_PATHS_DATA" "GF_PATHS_LOGS" "GF_SERVER_HTTP_PORT" "GF_SECURITY_ADMIN_USER" "GF_SECURITY_ADMIN_PASSWORD" "GF_PLUGINS_PREINSTALL_DISABLED" "QUICKWIT_URL" "SIEM_POSTGRES_HOST" "SIEM_POSTGRES_PORT" "SIEM_POSTGRES_DB" "SIEM_POSTGRES_USER" "SIEM_POSTGRES_PASSWORD" "SIEM_POSTGRES_SSLMODE" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "grafana") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: grafana
+      {{- with .Values.workloads.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpecAs" (dict "root" . "runAsUser" $v.runAsUser) | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: grafana
+          image: {{ $image }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          env:
+            - name: GF_PATHS_PROVISIONING
+              value: /etc/grafana/provisioning-k8s
+            # Not /var/lib/grafana: the image keeps its dashboards there.
+            - name: GF_PATHS_DATA
+              value: /var/lib/grafana-data
+            - name: GF_PATHS_LOGS
+              value: /var/log/grafana
+            - name: GF_SERVER_HTTP_PORT
+              value: "3000"
+            # The plugins are baked in and their directory is read-only; no
+            # download at start.
+            - name: GF_PLUGINS_PREINSTALL_DISABLED
+              value: "true"
+            - name: QUICKWIT_URL
+              value: {{ printf "%s/api/v1" (include "samma-siem.quickwitUrl" .) | quote }}
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.adminUser }}
+                  optional: true
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.adminPassword }}
+            - name: SIEM_POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.postgresHost }}
+            # Left out of the Secret: the image's 5432.
+            - name: SIEM_POSTGRES_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.postgresPort }}
+                  optional: true
+            - name: SIEM_POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.postgresDatabase }}
+            - name: SIEM_POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.postgresUser }}
+            - name: SIEM_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.postgresPassword }}
+            # Left out of the Secret: the image's require.
+            - name: SIEM_POSTGRES_SSLMODE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $k.postgresSslmode }}
+                  optional: true
+            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" $reserved "what" "grafana.env") | trim }}{{ . | nindent 12 }}{{ end }}
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            # grafana.db (sessions, users), rebuilt at every start.
+            - name: data
+              mountPath: /var/lib/grafana-data
+            - name: logs
+              mountPath: /var/log/grafana
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: logs
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# The UI. Inside the cluster only: kubectl port-forward (README).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "samma-siem.selectorLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+{{- end }}

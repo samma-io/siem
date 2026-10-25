@@ -1,0 +1,121 @@
+{{- if .Values.storage.enabled }}
+{{- /*
+siem-storage: samma.logs.<lane> (consumer storage-logs on SIEM_LOGS) ->
+Postgres siem_events, and samma.logs.<lane> / samma.alerts.> (consumers
+storage-s3-logs, storage-s3-alerts) -> the S3 archive. The consumers are the
+streams Job's; with STORAGE_NATS_SUBSCRIBE empty the service binds to them.
+siem_events is created by the service's migrations at start.
+*/ -}}
+{{- $v := .Values.storage -}}
+{{- $backends := include "samma-siem.storageBackends" . | fromJsonArray -}}
+{{- $reserved := list "STORAGE_BACKENDS" "STORAGE_HTTP_PORT" "STORAGE_NATS_URL" "STORAGE_NATS_SUBSCRIBE" "STORAGE_NATS_STREAM" "STORAGE_NATS_CONSUMER" "STORAGE_BATCH_SIZE" "STORAGE_BATCH_WAIT" "STORAGE_POSTGRES_DSN" "STORAGE_EVENTS_RETENTION" "STORAGE_S3_ENDPOINT" "STORAGE_S3_BUCKET" "STORAGE_S3_REGION" "STORAGE_S3_PATH_STYLE" "STORAGE_S3_FLUSH_BYTES" "STORAGE_S3_FLUSH_INTERVAL" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_REGION" -}}
+{{- $flush := include "samma-siem.nanos" $v.s3.flushInterval | int64 -}}
+{{- if and (has "s3" $backends) (le (include "samma-siem.nanos" .Values.consumers.ackWait.storageS3Logs | int64) $flush) -}}
+{{- fail (printf "consumers.ackWait.storageS3Logs (%s) must exceed storage.s3.flushInterval (%s)" .Values.consumers.ackWait.storageS3Logs $v.s3.flushInterval) -}}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "samma-siem.workloadName" (dict "root" . "suffix" "siem-storage") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: siem-storage
+  annotations:
+    siem.samma.io/backends: {{ join "," $backends | quote }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "siem-storage") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: siem-storage
+      {{- with .Values.workloads.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" . | nindent 6 }}
+      # Unacked messages (an S3 object not yet written) are redelivered after
+      # their AckWait; nothing is lost by stopping.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: siem-storage
+          image: {{ include "samma-siem.workloadImage" (dict "name" "storage" "values" $v) }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          env:
+            - name: STORAGE_BACKENDS
+              value: {{ join "," $backends | quote }}
+            - name: STORAGE_HTTP_PORT
+              value: "8081"
+            - name: STORAGE_NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            {{- if has "postgres" $backends }}
+            # Empty STORAGE_NATS_SUBSCRIBE: bind to the streams Job's consumer.
+            - name: STORAGE_NATS_STREAM
+              value: SIEM_LOGS
+            - name: STORAGE_NATS_CONSUMER
+              value: storage-logs
+            - name: STORAGE_BATCH_SIZE
+              value: {{ $v.batchSize | quote }}
+            - name: STORAGE_BATCH_WAIT
+              value: {{ $v.batchWait | quote }}
+            # The service has no *_FILE setting; the DSN comes from the
+            # Secret, never from values.
+            - name: STORAGE_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "samma-siem.postgresSecret" . }}
+                  key: {{ .Values.postgres.dsnKey }}
+            - name: STORAGE_EVENTS_RETENTION
+              value: {{ $v.eventsRetention | quote }}
+            {{- end }}
+            {{- if has "s3" $backends }}
+            {{- $creds := include "samma-siem.s3Credentials" . | fromJson }}
+            - name: STORAGE_S3_ENDPOINT
+              value: {{ include "samma-siem.s3Endpoint" . | quote }}
+            - name: STORAGE_S3_BUCKET
+              value: {{ required "s3.bucket is required" .Values.s3.bucket | quote }}
+            - name: STORAGE_S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: STORAGE_S3_PATH_STYLE
+              value: {{ .Values.s3.forcePathStyle | toString | quote }}
+            - name: STORAGE_S3_FLUSH_INTERVAL
+              value: {{ $v.s3.flushInterval | quote }}
+            - name: STORAGE_S3_FLUSH_BYTES
+              value: {{ $v.s3.flushBytes | int64 | toString | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $creds.secret }}
+                  key: {{ $creds.idKey }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $creds.secret }}
+                  key: {{ $creds.secretKey }}
+            {{- end }}
+            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" $reserved "what" "storage.env") | trim }}{{ . | nindent 12 }}{{ end }}
+          ports:
+            - name: http
+              containerPort: 8081
+          # /healthz is healthy only when every configured backend is.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+{{- end }}

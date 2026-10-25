@@ -214,10 +214,21 @@ siem.samma.io/instance: {{ . }}
 {{- /*
 samma-siem.workloadPodSpec: the pod-level fields every workload shares:
 scheduling, pull Secrets, no service account token and the hardened pod
-security context.
+security context, as workloads.runAsUser.
 */ -}}
 {{- define "samma-siem.workloadPodSpec" -}}
-{{- $w := .Values.workloads -}}
+{{- include "samma-siem.workloadPodSpecAs" (dict "root" . "runAsUser" .Values.workloads.runAsUser) -}}
+{{- end -}}
+
+{{- /*
+samma-siem.workloadPodSpecAs: samma-siem.workloadPodSpec as another non-root
+uid, for an image whose files belong to its own user (Grafana, 472).
+
+  {{ include "samma-siem.workloadPodSpecAs" (dict "root" . "runAsUser" 472) }}
+*/ -}}
+{{- define "samma-siem.workloadPodSpecAs" -}}
+{{- $w := .root.Values.workloads -}}
+{{- if not (gt (int .runAsUser) 0) }}{{ fail "a workload runs as a non-root uid" }}{{ end -}}
 automountServiceAccountToken: false
 {{- with $w.imagePullSecrets }}
 imagePullSecrets:
@@ -238,7 +249,7 @@ affinity:
   {{- toYaml . | nindent 2 }}
 {{- end }}
 securityContext:
-  {{- include "samma-siem.podSecurity" $w | nindent 2 }}
+  {{- include "samma-siem.podSecurity" (dict "runAsUser" .runAsUser) | nindent 2 }}
 {{- end -}}
 
 {{- /*
@@ -264,7 +275,7 @@ samma-siem.postgresSecret: postgres.existingSecret, required by the
 workloads that keep state in Postgres.
 */ -}}
 {{- define "samma-siem.postgresSecret" -}}
-{{- required "postgres.existingSecret (a Secret with the DSN of the siem database) is required by the ingester and alert-destination" .Values.postgres.existingSecret -}}
+{{- required "postgres.existingSecret (a Secret with the DSN of the siem database) is required by the ingester, alert-destination and siem-storage" .Values.postgres.existingSecret -}}
 {{- end -}}
 
 {{- /*
@@ -272,4 +283,22 @@ samma-siem.seconds: a duration like 60s or 2m in whole seconds.
 */ -}}
 {{- define "samma-siem.seconds" -}}
 {{- div (include "samma-siem.nanos" .) 1000000000 -}}
+{{- end -}}
+
+
+{{- /*
+samma-siem.storageBackends: storage.backends, checked, as a JSON list.
+*/ -}}
+{{- define "samma-siem.storageBackends" -}}
+{{- $b := .Values.storage.backends | default list -}}
+{{- if not $b }}{{ fail "storage.backends must list postgres, s3 or both" }}{{ end -}}
+{{- range $b }}{{ if not (has (toString .) (list "postgres" "s3")) }}{{ fail (printf "storage.backends: %q is not supported by this chart (postgres, s3)" (toString .)) }}{{ end }}{{ end -}}
+{{- toJson (uniq $b) -}}
+{{- end -}}
+
+{{- /*
+samma-siem.quickwitUrl: the in-cluster REST base of the quickwit Service.
+*/ -}}
+{{- define "samma-siem.quickwitUrl" -}}
+http://{{ include "samma-siem.workloadName" (dict "root" . "suffix" "quickwit") }}.{{ .Release.Namespace }}.svc:7280
 {{- end -}}

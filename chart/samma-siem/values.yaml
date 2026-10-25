@@ -5,6 +5,9 @@
 #   ingester-<source> -> samma.raw.<lane> -> vector -> samma.logs.<lane> ->
 #   detection-engine-<lane> -> samma.alerts.<lane> -> alert-destination -> Postgres
 #
+#   samma.logs.<lane>, samma.alerts.> -> siem-storage -> Postgres siem_events, S3 archive
+#   quickwit (search, Postgres metastore, S3 index) <- grafana (dashboards)
+#
 # Nothing here is exposed outside the cluster: every Service is ClusterIP and
 # the chart renders no Ingress.
 
@@ -163,6 +166,17 @@ consumers:
     # ingester-<source> on INGESTER_SLICES. Must exceed the ingester
     # daemon's 15-minute message timeout.
     ingester: 20m
+    # storage-logs on SIEM_LOGS (siem-storage, postgres backend). Messages
+    # are acked once their batch (storage.batchSize, storage.batchWait) is
+    # committed; the service's own default when it creates it is 30s.
+    storage: 60s
+    # storage-s3-logs on SIEM_LOGS. A message stays unacked until the object
+    # holding it is written, at the latest after storage.s3.flushInterval:
+    # must exceed it. The service uses the interval plus one minute.
+    storageS3Logs: 6m
+    # storage-s3-alerts on SIEM_ALERTS: one object per alert, acked after the
+    # PutObject. The service's own value.
+    storageS3Alerts: 2m
 
 # The image of the streams Job. Takes image, tag and digest: a digest
 # renders image@digest and wins over the tag.
@@ -182,8 +196,9 @@ natsBox:
       memory: 64Mi
 
 # S3-compatible object store for the archive (nats-transport.md, "Object
-# archive"): s3://<bucket>/<lane>/date=YYYY-MM-DD/<name>.log.gz. Nothing
-# writes to it yet. With minio.enabled the defaults point at the bundled
+# archive"): s3://<bucket>/<lane>/date=YYYY-MM-DD/<name>.log.gz, written by
+# siem-storage (and alerts/log_source=<lane>/...), with Quickwit's index under
+# quickwit/indexes. With minio.enabled the defaults point at the bundled
 # MinIO; set minio.enabled: false and fill these in for any other S3.
 s3:
   # Empty with minio.enabled: http://<release>-minio.<namespace>.svc:9000.
@@ -196,6 +211,9 @@ s3:
   existingSecret: ""
   accessKeyIdKey: accessKeyId
   secretAccessKeyKey: secretAccessKey
+  # Path-style addressing (http://host/bucket), which MinIO needs. false for
+  # AWS S3 virtual-hosted buckets.
+  forcePathStyle: true
 
 # The bucket-create hook Job (mc mb --ignore-existing), rendered only with
 # minio.enabled. The image has no shell; mc reads the endpoint and
@@ -273,12 +291,15 @@ minio:
 # siem-postgres Secret of samma-io/deploy siem/ (database and role "siem",
 # never the scan_results database). The chart deploys no Postgres and never
 # creates this Secret. The ingester (ingester_checkpoint) and
-# alert-destination (alert_ledger, siem_alerts) mount the key as a file.
+# alert-destination (alert_ledger, siem_alerts) mount the key as a file;
+# siem-storage (siem_events) reads it into STORAGE_POSTGRES_DSN, as it has no
+# file setting. Grafana never gets this Secret (grafana.existingSecret).
 postgres:
   existingSecret: siem-postgres
   dsnKey: dsn
 
-# Shared by the four workloads below. Every pod runs as this non-root uid
+# Shared by the workloads below. Every pod runs as this non-root uid (Grafana
+# as grafana.runAsUser)
 # with a read-only root filesystem, no capabilities, the RuntimeDefault
 # seccomp profile and no service account token.
 workloads:
@@ -373,3 +394,127 @@ alertDestination:
       memory: 32Mi
     limits:
       memory: 128Mi
+
+# siem-storage (samma-io/siem-storage): stores SIEM_LOGS in Postgres
+# siem_events (consumer storage-logs) and archives SIEM_LOGS and SIEM_ALERTS
+# to S3 (consumers storage-s3-logs, storage-s3-alerts). It never writes
+# siem_alerts: that table is alert-destination's. The streams Job creates
+# the consumers of the configured backends.
+storage:
+  enabled: true
+  # postgres, s3 or both. elasticsearch, which the service also has, is not
+  # offered here: there is no Elasticsearch in the Kubernetes SIEM.
+  backends: [postgres, s3]
+  image: ghcr.io/samma-io/siem-storage
+  # Built by siem-storage CI (build.yml, tag sha-<short sha>) from main at
+  # 6c3f143, the merge of the S3 backend.
+  tag: sha-6c3f143
+  digest: ""
+  pullPolicy: IfNotPresent
+  replicas: 1
+  # STORAGE_BATCH_SIZE / STORAGE_BATCH_WAIT of the postgres backend.
+  batchSize: 100
+  batchWait: 1s
+  # STORAGE_EVENTS_RETENTION: TimescaleDB retention of siem_events, a
+  # Postgres interval.
+  eventsRetention: 30 days
+  s3:
+    # STORAGE_S3_FLUSH_INTERVAL. Must stay below
+    # consumers.ackWait.storageS3Logs.
+    flushInterval: 5m
+    # STORAGE_S3_FLUSH_BYTES: write a lane's object at this uncompressed size.
+    flushBytes: 16777216
+  # Extra env, name: value (STORAGE_* from the service's README).
+  env: {}
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# Quickwit (samma-io/quickwit) in QW_MODE=k8s: search over the logs-saas,
+# logs-k8s, logs-scanner and alerts indexes (created at start by the image's
+# auto-bootstrap), metastore in Postgres, index data on S3. ClusterIP Service
+# on 7280 only. Quickwit has no authentication: reach it with kubectl
+# port-forward (README).
+#
+# Off by default: its image is pushed by hand (aws-siem hack/build-images.sh),
+# so there is no tag to default to, and the metastore Secret must exist.
+quickwit:
+  enabled: false
+  image: ghcr.io/samma-io/quickwit
+  # Required: an image built from samma-io/quickwit main at 10d8377 or later
+  # (QW_MODE=k8s). There is no default.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  # 1 only: the pod has no peers, a second replica would be a second cluster.
+  replicas: 1
+  metastore:
+    # Required. A Secret with QW_METASTORE_URI, postgres://user:pass@host:5432/db,
+    # under the key below. A database of its own (Quickwit runs its own
+    # migrations in it), not the siem database's DSN.
+    existingSecret: ""
+    uriKey: uri
+  # QW_DEFAULT_INDEX_ROOT_URI. Empty: s3://<s3.bucket>/quickwit/indexes.
+  indexRootUri: ""
+  # A NetworkPolicy admitting port 7280 only from this release's Grafana and
+  # Vector pods (Quickwit README, "Security"). Needs a CNI that enforces it;
+  # kubectl port-forward is not affected.
+  networkPolicy:
+    enabled: true
+  # Extra env, name: value (QW_* from the image's README).
+  env: {}
+  # QW_DATA_DIR is an emptyDir of this size: staged splits and the ingest WAL.
+  dataSizeLimit: 2Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
+# Grafana (samma-io/grafana) with the Kubernetes provisioning tree
+# (GF_PATHS_PROVISIONING=/etc/grafana/provisioning-k8s): the Quickwit
+# datasources at the quickwit Service, and siem_alerts through a read-only
+# Postgres role. ClusterIP Service on 3000 only; reach it with kubectl
+# port-forward (README). Nothing persists: dashboards and datasources are
+# provisioned from the image, and the data directory is an emptyDir.
+#
+# Off by default: the image is pushed by hand and needs its Secret.
+grafana:
+  enabled: false
+  image: ghcr.io/samma-io/grafana
+  # Required: an image built from samma-io/grafana with provisioning-k8s
+  # (samma-io/grafana#3). There is no default.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  replicas: 1
+  # The image's own user, who owns its plugins and provisioning files.
+  runAsUser: 472
+  # Required. A Secret of Grafana's own with the admin password and the
+  # read-only database login (Grafana README, "The read-only database
+  # user"). Never postgres.existingSecret: that is the siem role, which
+  # writes the tables; the chart refuses it.
+  existingSecret: ""
+  # Key names in that Secret. port and sslmode may be left out of it (the
+  # image defaults, 5432 and require).
+  keys:
+    adminUser: admin-user
+    adminPassword: admin-password
+    postgresHost: postgres-host
+    postgresPort: postgres-port
+    postgresDatabase: postgres-database
+    postgresUser: postgres-user
+    postgresPassword: postgres-password
+    postgresSslmode: postgres-sslmode
+  # Extra env, name: value (GF_* settings).
+  env: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi

@@ -1,13 +1,19 @@
 # samma-siem chart
 
-The Helm chart of the Kubernetes SIEM: ingester, Vector, detection-engine and
-alert-destination talking over NATS JetStream.
+The Helm chart of the Kubernetes SIEM: ingester, Vector, detection-engine,
+alert-destination and siem-storage talking over NATS JetStream, with Quickwit
+and Grafana for search and dashboards.
 
 ```
 ingester-<source> ─► samma.raw.<lane> ─► vector ─► samma.logs.<lane> ─► detection-engine-<lane>
    (SIEM_RAW)                              (SIEM_LOGS)
 ─► samma.alerts.<lane> ─► alert-destination ─► Postgres siem_alerts
      (SIEM_ALERTS)
+
+samma.logs.<lane> ─► siem-storage ─► Postgres siem_events, S3 archive
+samma.alerts.>    ─► siem-storage ─► S3 archive
+grafana ─► quickwit (search; metastore in Postgres, index on S3)
+        ─► Postgres siem_alerts (read-only login)
 ```
 
 It installs:
@@ -15,7 +21,8 @@ It installs:
 - NATS with JetStream on a file store (the official `nats` chart, `nats.enabled`)
 - the streams `SIEM_RAW`, `SIEM_LOGS`, `SIEM_ALERTS` and `INGESTER_SLICES`, and
   their durable consumers, created by a hook Job
-- the four workloads (see "Workloads")
+- the pipeline workloads and siem-storage (see "Workloads")
+- Quickwit and Grafana, off by default (see "Storage, search and dashboards")
 - MinIO and an archive bucket (the official `minio` chart, `minio.enabled`), or
   any S3-compatible store you point it at
 - a reference to the existing TimescaleDB through a Secret (no Postgres is deployed)
@@ -122,11 +129,23 @@ is the DLQ of this transport.
 | `detection-engine-<lane>` | `detectionEngine` | 300s | equal to `ENGINE_VISIBILITY_TIMEOUT` |
 | `alert-destination` | `alertDestination` | 120s | above `ALERTDEST_DAEMON_MESSAGE_TIMEOUT` (60s) |
 | `ingester-<source>` | `ingester` | 20m | above the daemon's 15m message timeout |
+| `storage-logs` | `storage` | 60s | a batch of `storage.batchSize` committed to `siem_events` well within it |
+| `storage-s3-logs` | `storageS3Logs` | 6m | above `storage.s3.flushInterval` (5m): a message is acked only once its object is written. The chart refuses an AckWait at or below the interval |
+| `storage-s3-alerts` | `storageS3Alerts` | 2m | one object per alert; the service's own value |
+
+The storage consumers exist only with `storage.enabled`, and only for the
+configured `storage.backends`: `storage-logs` (on `SIEM_LOGS`) for `postgres`,
+`storage-s3-logs` (on `SIEM_LOGS`) and `storage-s3-alerts` (on `SIEM_ALERTS`)
+for `s3`. The two on `SIEM_LOGS` filter on every lane's `samma.logs.<lane>`
+(`filter_subjects`). The S3 ones hold messages unacked for up to a flush
+interval, so they have `max_ack_pending` 10000, as the service creates them;
+every other consumer has 1000.
 
 ## Workloads
 
 Each workload is a Deployment with no Ingress and at most a ClusterIP Service.
-Every pod runs as uid 65532 (`workloads.runAsUser`), non-root, with a read-only
+Every pod runs as uid 65532 (`workloads.runAsUser`; Grafana as its image's
+472, `grafana.runAsUser`), non-root, with a read-only
 root filesystem, all capabilities dropped, the RuntimeDefault seccomp profile, no
 service account token, requests and limits, and `kubernetes.io/arch: amd64` (the
 images are linux/amd64 only). The env, args, probes and ports are those of the
@@ -138,6 +157,9 @@ deployment running on v2 (`samma-io/deploy` `siem/`).
 | `<release>-vector` | release, if a lane has raw records | `SIEM_RAW` (`vector-<lane>`) | `samma.logs.<lane>` | `--config /etc/vector/vector-k8s.yaml`, the config baked into the image |
 | `<release>-detection-engine-<lane>` | entry of `lanes` | `SIEM_LOGS` (`detection-engine-<lane>`) | `samma.alerts.<lane>` | `ENGINE_TRANSPORT=nats`, rules baked in at `/rules`, ClusterIP Service on `:9090` |
 | `<release>-alert-destination` | release | `SIEM_ALERTS` (`alert-destination`) | `siem_alerts`, `alert_ledger` | `ALERTDEST_TRANSPORT=nats`, routes from ConfigMap `<release>-alert-routes` |
+| `<release>-siem-storage` | release, `storage.enabled` | `SIEM_LOGS` (`storage-logs`, `storage-s3-logs`), `SIEM_ALERTS` (`storage-s3-alerts`) | `siem_events`, the S3 archive | `STORAGE_BACKENDS=postgres,s3`, binds to the Job's consumers |
+| `<release>-quickwit` | release, `quickwit.enabled` | ingest API | index on S3, metastore in Postgres | `QW_MODE=k8s`, `Recreate`, one replica, ClusterIP Service on `:7280` |
+| `<release>-grafana` | release, `grafana.enabled` | Quickwit, `siem_alerts` | nothing | k8s provisioning, runs as uid 472, ClusterIP Service on `:3000` |
 
 All of them use the chart's NATS URL: the in-release Service with
 `nats.enabled`, else `externalNats.url`. Until the streams Job has created their
@@ -153,6 +175,9 @@ are the tags running on v2:
 | `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane |
 | `detectionEngine` | `d5d7439` | NATS transport; knows the SaaS lanes only |
 | `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination |
+| `storage` | `sha-6c3f143` | siem-storage `main` with the Postgres and S3 backends, built by its CI |
+| `quickwit` | none, required | pushed by hand, see "Images built by hand" |
+| `grafana` | none, required | pushed by hand, see "Images built by hand" |
 
 **Lanes that need a newer image.** The `k8s` and `scanner` lanes and their rules
 are in detection-engine `main` from `0c5b5ce` on, and `d5d7439` refuses
@@ -184,9 +209,138 @@ Slack and GitHub tokens, mounted at `/var/run/secrets/alert-destination`; tokens
 never go in values.
 
 **Extra env.** `vector.env`, `detectionEngine.env`, `alertDestination.env` and
+`storage.env`, `quickwit.env`, `grafana.env` and
 `ingester.perSource.<source>.env` take `NAME: value` settings from the service's
 README. A name the chart sets (the transport, NATS, Postgres, routes) is refused,
 and an empty value is left out.
+
+## Storage, search and dashboards
+
+**siem-storage** is on by default with both backends. It needs nothing beyond
+what the pipeline already has: the DSN from `postgres.existingSecret` (it
+writes `siem_events`, created by its migrations at start, and never touches
+`siem_alerts`, which is alert-destination's) and the S3 settings from `s3.*`
+(the bundled MinIO by default, path-style, bucket `s3.bucket`). The service has
+no file setting for the DSN, so it gets `STORAGE_POSTGRES_DSN` from the Secret
+with `secretKeyRef`; it never logs it. `storage.backends: [postgres]` or `[s3]`
+runs one backend; `elasticsearch` is refused, there is none in this SIEM.
+
+**Quickwit** and **Grafana** are off by default: their images have no tag to
+default to, and each needs a Secret that only you can create. Turn them on
+together; Grafana's Quickwit datasources point at this release's Quickwit
+Service.
+
+### Quickwit
+
+```yaml
+quickwit:
+  enabled: true
+  tag: <short sha of samma-io/quickwit, 10d8377 or later>
+  metastore:
+    existingSecret: siem-quickwit-metastore   # key uri
+```
+
+- **Metastore.** A Secret with `QW_METASTORE_URI`,
+  `postgres://<user>:<password>@<host>:5432/<db>`, under `quickwit.metastore.uriKey`
+  (`uri`). Give Quickwit a database of its own; it runs its own migrations
+  there. The chart creates neither the Secret nor the database.
+- **Index data** goes to `quickwit.indexRootUri`, by default
+  `s3://<s3.bucket>/quickwit/indexes`, with the S3 endpoint and keys of `s3.*`.
+- The image's auto-bootstrap creates the four k8s indexes (`logs-saas`,
+  `logs-k8s`, `logs-scanner`, `alerts`) once `/health/readyz` answers.
+- One replica, `Recreate`: the node has no peers. `QW_DATA_DIR` (staged
+  splits, ingest WAL) is an emptyDir (`quickwit.dataSizeLimit`), `/tmp` another;
+  the root filesystem is read-only.
+- **Quickwit has no authentication.** Its Service is ClusterIP, and a
+  NetworkPolicy (`quickwit.networkPolicy.enabled`, on) admits port 7280 only
+  from this release's Grafana and Vector pods. It needs a CNI that enforces
+  NetworkPolicy.
+
+### Grafana
+
+```yaml
+grafana:
+  enabled: true
+  tag: <short sha of samma-io/grafana with provisioning-k8s>
+  existingSecret: siem-grafana
+```
+
+`GF_PATHS_PROVISIONING=/etc/grafana/provisioning-k8s`, `QUICKWIT_URL` is
+`http://<release>-samma-siem-quickwit.<namespace>.svc:7280/api/v1`. Everything
+else comes from `grafana.existingSecret`, a Secret of Grafana's own (key names
+in `grafana.keys`):
+
+| Key | Env | |
+|---|---|---|
+| `admin-password` | `GF_SECURITY_ADMIN_PASSWORD` | required |
+| `admin-user` | `GF_SECURITY_ADMIN_USER` | optional, `admin` |
+| `postgres-host` | `SIEM_POSTGRES_HOST` | required |
+| `postgres-port` | `SIEM_POSTGRES_PORT` | optional, `5432` |
+| `postgres-database` | `SIEM_POSTGRES_DB` | required, the database alert-destination writes `siem_alerts` into (`siem`) |
+| `postgres-user` | `SIEM_POSTGRES_USER` | required, **a read-only login** |
+| `postgres-password` | `SIEM_POSTGRES_PASSWORD` | required |
+| `postgres-sslmode` | `SIEM_POSTGRES_SSLMODE` | optional, `require` |
+
+The Postgres datasource runs whatever SQL a dashboard editor types, so
+read-only is enforced by the database: create the `siem_alerts_reader` role and
+its login as in the samma-io/grafana README, "The read-only database user"
+(`CONNECT`, `USAGE` on the schema, `SELECT` on `siem_alerts`, and
+`default_transaction_read_only`). **Never** point Grafana at
+`postgres.existingSecret`: that is the `siem` role, which owns and writes the
+tables. The chart refuses `grafana.existingSecret` equal to it.
+
+```bash
+kubectl -n samma-siem create secret generic siem-grafana \
+  --from-literal=admin-password="$(openssl rand -base64 24)" \
+  --from-literal=postgres-host=<timescaledb host> \
+  --from-literal=postgres-database=siem \
+  --from-literal=postgres-user=grafana_siem \
+  --from-literal=postgres-password='<the role password>'
+```
+
+Nothing persists: the dashboards and datasources are provisioned from the
+image, and the data directory (`GF_PATHS_DATA=/var/lib/grafana-data`, users
+and sessions) is an emptyDir, so a restart forgets UI-made users. The plugins
+are baked in, and preinstalled-plugin downloads are off. Grafana runs as uid
+472, the owner of its files in the image.
+
+### Reaching Grafana and Quickwit
+
+Neither has an Ingress or a hostname; both are ClusterIP. Use
+`kubectl port-forward` (release `samma-siem` in namespace `samma-siem`; the
+names are `<release>-samma-siem-*` unless the release name contains
+`samma-siem`):
+
+```bash
+kubectl -n samma-siem port-forward svc/samma-siem-grafana 3000:3000
+# http://localhost:3000, user admin, the admin-password of grafana.existingSecret
+
+kubectl -n samma-siem port-forward svc/samma-siem-quickwit 7280:7280
+# http://localhost:7280/ui/search, and the REST API under /api/v1
+```
+
+`helm status` prints the exact commands. Exposing either beyond that is a
+separate decision and not part of this chart.
+
+### Images built by hand
+
+`ghcr.io/samma-io/quickwit` and `ghcr.io/samma-io/grafana` are not built by CI.
+They are pushed with `samma-io/aws-siem`'s `hack/build-images.sh`, which runs
+each repo's `make image push` for linux/amd64 and tags with the repo's short
+git sha:
+
+```bash
+# Sibling checkouts of aws-siem, quickwit and grafana, each on the commit to ship:
+# quickwit main at 10d8377 or later (QW_MODE=k8s), grafana with provisioning-k8s
+# (samma-io/grafana#3).
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+aws-siem/hack/build-images.sh quickwit grafana
+# tags: git -C quickwit rev-parse --short HEAD, git -C grafana rev-parse --short HEAD
+```
+
+Set `quickwit.tag` and `grafana.tag` to those shas (or `.digest`). The chart
+fails the render when either is enabled without one, and refuses `latest`.
+If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 
 ## Values
 
@@ -213,6 +367,7 @@ and an empty value is left out.
 | `s3.region` | `us-east-1` | Region |
 | `s3.existingSecret` | empty | Secret with the S3 keys; empty with `minio.enabled` means the MinIO root Secret |
 | `s3.accessKeyIdKey`, `s3.secretAccessKeyKey` | `accessKeyId`, `secretAccessKey` | Key names in `s3.existingSecret` |
+| `s3.forcePathStyle` | `true` | Path-style addressing (MinIO); siem-storage and Quickwit |
 | `minioClient.image`, `.tag`, `.digest` | `cgr.dev/chainguard/minio-client` + digest | Image of the bucket Job |
 | `minio.enabled` | `true` | Install the `minio` chart (5.4.0), standalone, one 10Gi PVC |
 | `minio.existingSecret` | empty | Secret with `rootUser` and `rootPassword` |
@@ -223,7 +378,7 @@ and an empty value is left out.
 | `workloads.nodeSelector` | `kubernetes.io/arch: amd64` | Node selector of every workload |
 | `workloads.tolerations`, `.affinity`, `.podAnnotations` | empty | Scheduling and pod annotations |
 | `workloads.imagePullSecrets` | `[]` | Pull Secrets, by name, for private ghcr.io packages |
-| `<component>.enabled` | `true` | `ingester`, `vector`, `detectionEngine`, `alertDestination` |
+| `<component>.enabled` | `true` | `ingester`, `vector`, `detectionEngine`, `alertDestination`, `storage`; `false` for `quickwit`, `grafana` |
 | `<component>.image`, `.tag`, `.digest`, `.pullPolicy` | see "Workloads" | A digest wins over the tag; `latest` is refused |
 | `<component>.resources` | as on v2 | Requests and limits |
 | `vector.replicas`, `detectionEngine.replicas`, `alertDestination.replicas` | `1` | Replicas |
@@ -237,6 +392,19 @@ and an empty value is left out.
 | `ingester.perSource.<source>.replicas` | `0` for `google-workspace` | 0 or 1 |
 | `ingester.perSource.<source>.existingSecret`, `.secretOptional` | `ingester-google`, `true` | Credential Secret of the source |
 | `ingester.perSource.<source>.env` | Workspace subject and service account, empty | Extra `INGESTER_*` settings |
+| `storage.backends` | `[postgres, s3]` | `STORAGE_BACKENDS`; also which storage consumers exist |
+| `storage.batchSize`, `.batchWait` | `100`, `1s` | Postgres batches |
+| `storage.eventsRetention` | `30 days` | TimescaleDB retention of `siem_events` |
+| `storage.s3.flushInterval`, `.flushBytes` | `5m`, `16777216` | S3 object flush; the interval must stay below `consumers.ackWait.storageS3Logs` |
+| `storage.replicas` | `1` | Replicas |
+| `quickwit.metastore.existingSecret`, `.uriKey` | empty (required), `uri` | Secret with the `postgres://` metastore URI |
+| `quickwit.indexRootUri` | empty: `s3://<s3.bucket>/quickwit/indexes` | `QW_DEFAULT_INDEX_ROOT_URI` |
+| `quickwit.networkPolicy.enabled` | `true` | Admit 7280 only from this release's Grafana and Vector |
+| `quickwit.dataSizeLimit` | `2Gi` | emptyDir size of `QW_DATA_DIR` |
+| `grafana.existingSecret` | empty (required) | Admin password and read-only Postgres login; never `postgres.existingSecret` |
+| `grafana.keys.*` | see "Grafana" | Key names in that Secret |
+| `grafana.runAsUser` | `472` | uid of the Grafana pod |
+| `grafana.replicas` | `1` | Replicas |
 | `<component>.env` | `{}` | Extra env, see "Workloads" |
 
 Notes:
@@ -257,9 +425,11 @@ Notes:
   generated ones are alphanumeric. The Job runs only with `minio.enabled`. With
   another S3, create the bucket there.
 - **Postgres.** The ingester keeps `ingester_checkpoint` there, and
-  alert-destination `alert_ledger` and `siem_alerts`; both create their tables at
-  start. The DSN is mounted from `postgres.existingSecret` as a file
-  (`*_POSTGRES_DSN_FILE`), never put in env. The chart creates neither the
+  alert-destination `alert_ledger` and `siem_alerts`, and siem-storage
+  `siem_events`; each creates its tables at start. The ingester and
+  alert-destination mount the DSN from `postgres.existingSecret` as a file
+  (`*_POSTGRES_DSN_FILE`); siem-storage, which has no file setting, reads it
+  with `secretKeyRef`. It is never in values. The chart creates neither the
   Secret nor the database: create the role, database and Secret as in
   `samma-io/deploy` `siem/README.md` ("First install").
 
@@ -269,8 +439,9 @@ Notes:
 helm dependency build   # after the two `helm repo add` above chart/samma-siem
 helm lint --strict chart/samma-siem
 helm lint --strict chart/samma-siem -f chart/samma-siem/ci/all-lanes-values.yaml
+helm lint --strict chart/samma-siem -f chart/samma-siem/ci/all-enabled-values.yaml
 helm template ci chart/samma-siem --namespace samma
-hack/check-chart.sh            # streams, consumers and workloads, default and all lanes
+hack/check-chart.sh            # streams, consumers, workloads and refusals: default, all lanes, all enabled
 ```
 
 CI (`.github/workflows/chart.yml`) runs the same steps with Helm 3 and Helm 4.
