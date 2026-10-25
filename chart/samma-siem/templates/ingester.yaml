@@ -10,7 +10,14 @@ watermarks in Postgres.
 {{- $nats := include "samma-siem.natsUrl" . -}}
 {{- $rawLanes := list -}}
 {{- range include "samma-siem.lanes" . | fromJsonArray }}{{ if .raw }}{{ $rawLanes = append $rawLanes .name }}{{ end }}{{ end -}}
-{{- $reserved := list "INGESTER_TRANSPORT" "INGESTER_SOURCE" "INGESTER_MODE" "INGESTER_NATS_URL" "INGESTER_POSTGRES_DSN_FILE" "INGESTER_SCHEDULE_INTERVAL" "INGESTER_RECONCILE_INTERVAL" "INGESTER_SLICE_STREAM" "INGESTER_SLICE_CONSUMER" "INGESTER_SLICE_SUBJECT" "INGESTER_RAW_SUBJECT" "GOOGLE_APPLICATION_CREDENTIALS" -}}
+{{- $reserved := list "INGESTER_TRANSPORT" "INGESTER_SOURCE" "INGESTER_MODE" "INGESTER_NATS_URL" "INGESTER_POSTGRES_DSN_FILE" "INGESTER_SCHEDULE_INTERVAL" "INGESTER_RECONCILE_INTERVAL" "INGESTER_SLICE_STREAM" "INGESTER_SLICE_CONSUMER" "INGESTER_SLICE_SUBJECT" "INGESTER_RAW_SUBJECT" "GOOGLE_APPLICATION_CREDENTIALS" "INGESTER_SECRETS" "INGESTER_SLACK_TOKEN_FILE" "INGESTER_ONEPASSWORD_TOKEN_FILE" "INGESTER_CLOUDFLARE_TOKEN_FILE" -}}
+{{- /*
+The sources with a token (ingester README, "Token secrets"): with
+existingSecret the token is its key token, read with INGESTER_SECRETS=file
+from INGESTER_<SOURCE>_TOKEN_FILE. *_TOKEN_PARAM is not reserved: the
+ingester refuses it under file mode, which is what it should do.
+*/ -}}
+{{- $tokenSources := list "slack" "onepassword" "cloudflare" -}}
 {{- range $source := $v.sources }}
 {{- $source = toString $source }}
 {{- $cfg := mergeOverwrite (dict "replicas" $v.replicas "scheduleInterval" $v.scheduleInterval "reconcileInterval" $v.reconcileInterval "existingSecret" "" "secretOptional" false "env" dict) (deepCopy (get ($v.perSource | default dict) $source | default dict)) }}
@@ -26,6 +33,15 @@ watermarks in Postgres.
 {{- if not $cfg.existingSecret }}{{ fail "ingester.perSource.google-workspace.existingSecret (key key.json) is required with replicas: 1" }}{{ end }}
 {{- range $k := list "INGESTER_GWS_SUBJECT" "INGESTER_GCP_TARGET_SERVICE_ACCOUNT" }}
 {{- if not (get $cfg.env $k) }}{{ fail (printf "ingester.perSource.google-workspace.env.%s is required with replicas: 1" $k) }}{{ end }}
+{{- end }}
+{{- end }}
+{{- $token := has $source $tokenSources }}
+{{- if and (gt $replicas 0) $token }}
+{{- if not $cfg.existingSecret }}{{ fail (printf "ingester.perSource.%s.existingSecret (key token) is required with replicas: 1" $source) }}{{ end }}
+{{- if eq $source "cloudflare" }}
+{{- range $k := list "INGESTER_CLOUDFLARE_ACCOUNT_ID" "INGESTER_CLOUDFLARE_ZONE_IDS" }}
+{{- if not (get $cfg.env $k) }}{{ fail (printf "ingester.perSource.cloudflare.env.%s is required with replicas: 1" $k) }}{{ end }}
+{{- end }}
 {{- end }}
 {{- end }}
 ---
@@ -79,6 +95,12 @@ spec:
             {{- if and $cfg.existingSecret (eq $source "google-workspace") }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /var/run/secrets/ingester/key.json
+            {{- end }}
+            {{- if and $cfg.existingSecret $token }}
+            - name: INGESTER_SECRETS
+              value: file
+            - name: INGESTER_{{ upper $source }}_TOKEN_FILE
+              value: /var/run/secrets/ingester/token
             {{- end }}
             - name: INGESTER_SCHEDULE_INTERVAL
               value: {{ $cfg.scheduleInterval | quote }}
