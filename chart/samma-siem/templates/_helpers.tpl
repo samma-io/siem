@@ -370,3 +370,61 @@ reader the consumer would only track unacked alerts.
 {{- if and .Values.vector.enabled $raw }}true{{ end -}}
 {{- end -}}
 {{- end -}}
+
+{{- /*
+samma-siem.vectorQuickwitLanes: the NATS-only lanes (k8s, scanner) whose
+Quickwit overlay Vector loads, as a JSON list: with quickwit.enabled and
+vector.enabled, for each of them in lanes. Each overlay reads its own
+consumer vector-quickwit-<lane> on SIEM_LOGS, which the streams Job creates
+for exactly these lanes; Vector does not start if one is missing.
+
+The overlays are layered on vector-k8s.yaml and vector-k8s-quickwit.yaml
+(its Prometheus exporter) and cannot run without them, and vector-k8s.yaml
+reads consumer vector-workspace on SIEM_RAW. So they need the workspace lane
+with raw records; without it the chart refuses rather than render a Vector
+that would not start.
+*/ -}}
+{{- define "samma-siem.vectorQuickwitLanes" -}}
+{{- $out := list -}}
+{{- if and .Values.quickwit.enabled .Values.vector.enabled -}}
+{{- $workspace := false -}}
+{{- range include "samma-siem.lanes" . | fromJsonArray -}}
+{{- if and (eq .name "workspace") .raw }}{{ $workspace = true }}{{ end -}}
+{{- if has .name (list "k8s" "scanner") }}{{ $out = append $out .name }}{{ end -}}
+{{- end -}}
+{{- if and $out (not $workspace) -}}
+{{- fail (printf "vector: the Quickwit overlays of lanes %s layer on vector-k8s.yaml, which reads consumer vector-workspace on SIEM_RAW; add lane workspace (with raw records) to lanes, or set vector.enabled: false" (join ", " $out)) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}
+
+{{- /*
+samma-siem.logsMaxBytes: max_bytes of SIEM_LOGS in bytes, streams.logs.maxBytes
+plus streams.logs.laneMaxBytes.<lane> for every lane in lanes that has one.
+JetStream caps a stream, not a subject, so a lane's cap is room added to the
+one stream, shared by every lane in it.
+*/ -}}
+{{- define "samma-siem.logsMaxBytes" -}}
+{{- $total := include "samma-siem.bytes" .Values.streams.logs.maxBytes | int64 -}}
+{{- $extra := .Values.streams.logs.laneMaxBytes | default dict -}}
+{{- range include "samma-siem.lanes" . | fromJsonArray -}}
+{{- with get $extra .name }}{{ $total = add $total (include "samma-siem.bytes" . | int64) }}{{ end -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
+
+{{- /*
+samma-siem.quantityBytes: a Kubernetes quantity like 1Gi, 500M or 1073741824
+in bytes, or "" when it is not one of those forms (the chart then cannot
+check it).
+*/ -}}
+{{- define "samma-siem.quantityBytes" -}}
+{{- $s := toString . -}}
+{{- $units := dict "" 1 "k" 1000 "K" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 -}}
+{{- $n := regexFind "^[0-9]+" $s -}}
+{{- $u := trimPrefix $n $s -}}
+{{- if and $n (hasKey $units $u) -}}
+{{- mul (atoi $n) (get $units $u) -}}
+{{- end -}}
+{{- end -}}

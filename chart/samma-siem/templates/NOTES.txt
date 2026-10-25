@@ -23,7 +23,12 @@ Workloads (Postgres DSN from Secret {{ .Values.postgres.existingSecret | default
 {{- end }}
 {{- $raw := list }}{{ range $lanes }}{{ if .raw }}{{ $raw = append $raw .name }}{{ end }}{{ end }}
 {{- if and .Values.vector.enabled $raw }}
-  vector ({{ join ", " $raw }}){{ if .Values.quickwit.enabled }} -> quickwit logs-saas{{ if include "samma-siem.vectorQuickwitAlerts" . }}, alerts{{ end }}{{ end }}
+  vector ({{ join ", " $raw }}){{ if .Values.quickwit.enabled }} -> quickwit logs-saas{{ if include "samma-siem.vectorQuickwitAlerts" . }}, alerts{{ end }}{{ range include "samma-siem.vectorQuickwitLanes" . | fromJsonArray }}, logs-{{ . }}{{ end }}{{ end }}
+{{- $unread := without $raw "workspace" }}
+{{- if $unread }}
+         The baked Vector config filters the workspace lane only: {{ join ", " $unread }}
+         stay unfiltered in SIEM_RAW until a Vector image reads them.
+{{- end }}
 {{- end }}
 {{- if .Values.detectionEngine.enabled }}
 {{- range $lanes }}

@@ -70,6 +70,14 @@ do
   grep -qF -- "$want" <<<"$out" || fail "render lacks $want"
 done
 
+# SIEM_RAW's duplicate window covers a Workspace reconcile pass's reach (6h
+# lookback + 1h interval + margin = 8h, samma-io/ingester#8); SIEM_LOGS has
+# no lane cap without the k8s lane.
+stream() { grep -A20 -F "stream.$1.json:" <<<"$out"; }
+grep -qF '"duplicate_window": 28800000000000,' <<<"$(stream SIEM_RAW)" || fail "SIEM_RAW duplicate window is not 8h"
+grep -qF '"max_bytes": 419430400,' <<<"$(stream SIEM_LOGS)" || fail "SIEM_LOGS max_bytes is not 400MiB"
+grep -qF '"duplicate_window": 7200000000000,' <<<"$(stream INGESTER_SLICES)" || fail "INGESTER_SLICES duplicate window changed"
+
 # Never a wildcard on the lane streams.
 grep -qE '"samma\.(raw|logs)\.>"' <<<"$out" && fail "a lane stream captures a wildcard"
 
@@ -130,6 +138,7 @@ check_workload ci-samma-siem-ingester-google-workspace \
   '- name: INGESTER_TRANSPORT' 'value: "google-workspace"' "$nats" \
   '- name: INGESTER_POSTGRES_DSN_FILE' 'secretName: siem-postgres' \
   'value: /var/run/secrets/ingester/key.json' 'secretName: ingester-google'
+grep -qF 'INGESTER_SECRETS' <<<"$(doc ci-samma-siem-ingester-google-workspace Deployment)" && fail "the Workspace ingester has INGESTER_SECRETS"
 check_workload ci-samma-siem-alert-destination \
   'image: ghcr.io/samma-io/alert-destination:779befa' \
   '- name: ALERTDEST_TRANSPORT' "$nats" '- name: ALERTDEST_POSTGRES_DSN_FILE' \
@@ -187,20 +196,48 @@ deployments | grep -q siem-storage && fail "siem-storage rendered while disabled
 # Quickwit, Slack and GitHub routes.
 all_values=(-f "$chart/ci/all-enabled-values.yaml")
 out=$(render "${all_values[@]}")
-want_deps=$(printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-detection-engine-k8s \
-  ci-samma-siem-detection-engine-scanner ci-samma-siem-detection-engine-workspace ci-samma-siem-grafana \
-  ci-samma-siem-ingester-google-workspace ci-samma-siem-quickwit ci-samma-siem-siem-storage ci-samma-siem-vector | sort)
+saas='workspace slack onepassword cloudflare'
+want_deps=$( (printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-grafana ci-samma-siem-quickwit \
+  ci-samma-siem-siem-storage ci-samma-siem-vector ci-samma-siem-detection-engine-k8s ci-samma-siem-detection-engine-scanner \
+  ci-samma-siem-ingester-google-workspace ci-samma-siem-ingester-slack ci-samma-siem-ingester-onepassword ci-samma-siem-ingester-cloudflare
+  for l in $saas; do echo "ci-samma-siem-detection-engine-$l"; done) | sort)
 [ "$(deployments)" = "$want_deps" ] || fail "all-enabled Deployments: $(deployments | tr '\n' ' ')"
 check_waves
-want_svcs=$(printf '%s\n' ci-samma-siem-detection-engine-k8s ci-samma-siem-detection-engine-scanner \
-  ci-samma-siem-detection-engine-workspace ci-samma-siem-grafana ci-samma-siem-quickwit | sort)
+want_svcs=$( (printf '%s\n' ci-samma-siem-detection-engine-k8s ci-samma-siem-detection-engine-scanner \
+  ci-samma-siem-grafana ci-samma-siem-quickwit
+  for l in $saas; do echo "ci-samma-siem-detection-engine-$l"; done) | sort)
 [ "$(services)" = "$want_svcs" ] || fail "all-enabled Services: $(services | tr '\n' ' ')"
-want_cons=$(printf '%s\n' SIEM_ALERTS.alert-destination SIEM_ALERTS.storage-s3-alerts \
-  SIEM_LOGS.detection-engine-workspace SIEM_LOGS.detection-engine-k8s SIEM_LOGS.detection-engine-scanner \
-  SIEM_LOGS.storage-logs SIEM_LOGS.storage-s3-logs SIEM_RAW.vector-workspace \
-  SIEM_ALERTS.vector-alerts-quickwit INGESTER_SLICES.ingester-google-workspace | sort)
+want_cons=$( (printf '%s\n' SIEM_ALERTS.alert-destination SIEM_ALERTS.storage-s3-alerts \
+  SIEM_LOGS.detection-engine-k8s SIEM_LOGS.detection-engine-scanner \
+  SIEM_LOGS.storage-logs SIEM_LOGS.storage-s3-logs SIEM_ALERTS.vector-alerts-quickwit \
+  SIEM_LOGS.vector-quickwit-k8s SIEM_LOGS.vector-quickwit-scanner \
+  INGESTER_SLICES.ingester-google-workspace INGESTER_SLICES.ingester-slack \
+  INGESTER_SLICES.ingester-onepassword INGESTER_SLICES.ingester-cloudflare
+  for l in $saas; do echo "SIEM_RAW.vector-$l"; echo "SIEM_LOGS.detection-engine-$l"; done) | sort)
 [ "$(consumers)" = "$want_cons" ] || fail "all-enabled consumers: $(consumers | tr '\n' ' ')"
-lanes='["samma.logs.workspace","samma.logs.k8s","samma.logs.scanner"]'
+lanes='["samma.logs.workspace","samma.logs.slack","samma.logs.onepassword","samma.logs.cloudflare","samma.logs.k8s","samma.logs.scanner"]'
+grep -qF '"subjects": ["samma.raw.workspace","samma.raw.slack","samma.raw.onepassword","samma.raw.cloudflare"]' <<<"$(stream SIEM_RAW)" || fail "all-enabled SIEM_RAW subjects"
+# SIEM_LOGS: 400MiB plus the k8s lane's 2GiB.
+grep -qF '"max_bytes": 2566914048,' <<<"$(stream SIEM_LOGS)" || fail "SIEM_LOGS max_bytes lacks the k8s lane cap"
+grep -qF 'siem.samma.io/raw-lanes: "workspace,slack,onepassword,cloudflare"' <<<"$out" || fail "vector raw-lanes annotation"
+# The token sources read their Secret's key token with INGESTER_SECRETS=file.
+for src in slack onepassword cloudflare; do
+  up=$(tr a-z A-Z <<<"$src")
+  check_workload "ci-samma-siem-ingester-$src" 'image: ghcr.io/samma-io/ingester:b4c844c' \
+    "value: \"$src\"" '- name: INGESTER_SECRETS
+              value: file' "- name: INGESTER_${up}_TOKEN_FILE
+              value: /var/run/secrets/ingester/token" \
+    'mountPath: /var/run/secrets/ingester' "secretName: ingester-$src"
+  d=$(doc "ci-samma-siem-ingester-$src" Deployment)
+  grep -qF 'GOOGLE_APPLICATION_CREDENTIALS' <<<"$d" && fail "ingester-$src has GOOGLE_APPLICATION_CREDENTIALS"
+  grep -qF '_TOKEN_PARAM' <<<"$d" && fail "ingester-$src has a *_TOKEN_PARAM"
+  [ "$(grep -c '_TOKEN_FILE' <<<"$d")" = 1 ] || fail "ingester-$src has more than its own token file"
+done
+grep -qF 'replicas: 1' <<<"$(doc ci-samma-siem-ingester-slack Deployment)" || fail "ingester-slack is not live"
+grep -qF 'replicas: 0' <<<"$(doc ci-samma-siem-ingester-onepassword Deployment)" || fail "ingester-onepassword is not at 0"
+check_workload ci-samma-siem-ingester-cloudflare 'replicas: 1' \
+  '- name: INGESTER_CLOUDFLARE_ACCOUNT_ID' '- name: INGESTER_CLOUDFLARE_ZONE_IDS'
+grep -qF 'INGESTER_SECRETS' <<<"$(doc ci-samma-siem-ingester-google-workspace Deployment)" && fail "the Workspace ingester has INGESTER_SECRETS"
 grep -qF "\"filter_subjects\": $lanes" <<<"$(cons SIEM_LOGS.storage-logs)" || fail "storage-logs lacks a lane"
 grep -qF "\"filter_subjects\": $lanes" <<<"$(cons SIEM_LOGS.storage-s3-logs)" || fail "storage-s3-logs lacks a lane"
 check_workload ci-samma-siem-siem-storage 'value: "postgres,s3"' "$nats"
@@ -221,15 +258,22 @@ for svc in ci-samma-siem-quickwit ci-samma-siem-grafana; do
   grep -qF 'type: ClusterIP' <<<"$(doc $svc Service)" || fail "Service $svc is not ClusterIP"
 done
 grep -qF 'values: [grafana, vector]' <<<"$(doc ci-samma-siem-quickwit NetworkPolicy)" || fail "no Quickwit NetworkPolicy"
-# Vector into Quickwit: both overlays after the base config, QUICKWIT_URL the
-# REST base without /api/v1, and the alerts consumer for its overlay.
+# Vector into Quickwit: every overlay after the base config (logs-saas,
+# alerts, then the k8s and scanner lanes), QUICKWIT_URL the REST base without
+# /api/v1, and the consumers of the alerts and lane overlays.
 check_workload ci-samma-siem-vector "$nats" \
-  'args: [--config, "/etc/vector/vector-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit.yaml", --config, "/etc/vector/vector-k8s-quickwit-alerts.yaml"]' \
+  'args: [--config, "/etc/vector/vector-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit.yaml", --config, "/etc/vector/vector-k8s-quickwit-alerts.yaml", --config, "/etc/vector/vector-k8s-quickwit-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit-scanner.yaml"]' \
   '- name: QUICKWIT_URL
               value: "http://ci-samma-siem-quickwit.samma.svc:7280"'
 grep -qF '"filter_subject": "samma.alerts.>"' <<<"$(cons SIEM_ALERTS.vector-alerts-quickwit)" || fail "vector-alerts-quickwit filter"
 grep -qF '"durable_name": "vector-alerts-quickwit"' <<<"$(cons SIEM_ALERTS.vector-alerts-quickwit)" || fail "vector-alerts-quickwit name"
 grep -qF '"ack_wait": 120000000000' <<<"$(cons SIEM_ALERTS.vector-alerts-quickwit)" || fail "vector-alerts-quickwit AckWait"
+for lane in k8s scanner; do
+  c=$(cons "SIEM_LOGS.vector-quickwit-$lane")
+  grep -qF "\"durable_name\": \"vector-quickwit-$lane\"" <<<"$c" || fail "vector-quickwit-$lane name"
+  grep -qF "\"filter_subject\": \"samma.logs.$lane\"" <<<"$c" || fail "vector-quickwit-$lane filter"
+  grep -qF '"ack_wait": 60000000000' <<<"$c" || fail "vector-quickwit-$lane AckWait"
+done
 # Slack and GitHub routed: both token files, from the whole Secret.
 check_workload ci-samma-siem-alert-destination \
   '- name: ALERTDEST_SLACK_TOKEN_FILE
@@ -243,13 +287,28 @@ grep -qF '{to: slack, target: C0EXAMPLE1}' <<<"$(doc ci-samma-siem-alert-routes 
 # Quickwit without vector.quickwitAlerts: the logs overlay only, no consumer.
 out=$(render "${all_values[@]}" --set vector.quickwitAlerts=false)
 check_workload ci-samma-siem-vector \
-  'args: [--config, "/etc/vector/vector-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit.yaml"]' \
+  'args: [--config, "/etc/vector/vector-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit.yaml", --config, "/etc/vector/vector-k8s-quickwit-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit-scanner.yaml"]' \
   'value: "http://ci-samma-siem-quickwit.samma.svc:7280"'
 consumers | grep -q vector-alerts-quickwit && fail "vector-alerts-quickwit without vector.quickwitAlerts"
-# vector.quickwitAlerts with no Vector (no raw lane): no consumer either.
-out=$(render "${all_values[@]}" --set 'lanes[0].name=k8s' --set 'lanes[0].raw=false' --set-json 'lanes[1]={"name":"scanner","raw":false}' --set ingester.enabled=false)
-deployments | grep -q vector && fail "vector rendered without a raw lane"
-consumers | grep -q vector-alerts-quickwit && fail "vector-alerts-quickwit without a Vector"
+# One lane overlay: workspace and k8s only, the k8s overlay and consumer.
+out=$(render "${all_values[@]}" --set-json 'lanes=["workspace",{"name":"k8s","raw":false}]' \
+  --set-json 'ingester.sources=["google-workspace"]')
+check_workload ci-samma-siem-vector \
+  'args: [--config, "/etc/vector/vector-k8s.yaml", --config, "/etc/vector/vector-k8s-quickwit.yaml", --config, "/etc/vector/vector-k8s-quickwit-alerts.yaml", --config, "/etc/vector/vector-k8s-quickwit-k8s.yaml"]'
+[ "$(consumers | grep vector-quickwit)" = "SIEM_LOGS.vector-quickwit-k8s" ] || fail "workspace+k8s: $(consumers | grep vector-quickwit | tr '\n' ' ')"
+# The k8s and scanner overlays layer on the base config, which reads
+# vector-workspace: without the workspace raw lane they are refused, and with
+# vector.enabled: false there is no Vector and none of its consumers.
+nows=(--set-json 'lanes=[{"name":"k8s","raw":false},{"name":"scanner","raw":false}]' --set ingester.enabled=false)
+render "${all_values[@]}" "${nows[@]}" >/dev/null 2>&1 && fail "the k8s and scanner overlays rendered without the workspace lane"
+render "${all_values[@]}" "${nows[@]}" --set streams.enabled=false >/dev/null 2>&1 && fail "the k8s and scanner overlays rendered without the workspace lane (no streams)"
+render "${all_values[@]}" --set-json 'lanes=[{"name":"workspace","raw":false},{"name":"k8s","raw":false}]' --set ingester.enabled=false >/dev/null 2>&1 \
+  && fail "the k8s overlay rendered with a workspace lane without raw records"
+err=$(render "${all_values[@]}" "${nows[@]}" 2>&1 >/dev/null || true)
+grep -qF 'add lane workspace (with raw records) to lanes, or set vector.enabled: false' <<<"$err" || fail "the workspace-lane refusal does not say what to do: $err"
+out=$(render "${all_values[@]}" "${nows[@]}" --set vector.enabled=false)
+deployments | grep -q vector && fail "vector rendered while disabled"
+consumers | grep -q vector- && fail "a Vector consumer without a Vector: $(consumers | grep vector- | tr '\n' ' ')"
 
 # existingSecret with the default postgres-only table: both files are set
 # (alert-destination ignores the unrouted ones), nothing is refused.
@@ -272,9 +331,13 @@ for lane in workspace k8s scanner; do
 done
 grep -qF 'siem.samma.io/raw-lanes: "workspace"' <<<"$out" || fail "vector is not on the workspace raw lane only"
 check_workload ci-samma-siem-vector "$nats"
+consumers | grep -q vector-quickwit && fail "vector-quickwit consumers without quickwit.enabled"
+grep -qF 'vector-k8s-quickwit' <<<"$(doc ci-samma-siem-vector Deployment)" && fail "a Quickwit overlay without quickwit.enabled"
+grep -qF '"max_bytes": 2566914048,' <<<"$(stream SIEM_LOGS)" || fail "all-lanes SIEM_LOGS max_bytes lacks the k8s lane cap"
 
 # A second lane without raw records: logs subject and engine consumer only.
-out=$(render --set 'lanes[0]=workspace' --set 'lanes[1].name=k8s' --set 'lanes[1].raw=false')
+out=$(render --set 'lanes[0]=workspace' --set 'lanes[1].name=k8s' --set 'lanes[1].raw=false' \
+  --set nats.config.jetstream.fileStore.pvc.size=4Gi)
 grep -qF '"subjects": ["samma.logs.workspace","samma.logs.k8s"]' <<<"$out" || fail "k8s lane missing from SIEM_LOGS"
 grep -qF 'consumer.SIEM_LOGS.detection-engine-k8s.json:' <<<"$out" || fail "no detection-engine-k8s consumer"
 grep -qF 'samma.raw.k8s' <<<"$out" && fail "raw: false lane is in SIEM_RAW"
@@ -294,7 +357,8 @@ grep -qF 'value: "https://s3.example.invalid"' <<<"$(doc ci-samma-siem-siem-stor
 grep -qF 'name: s3' <<<"$(doc ci-samma-siem-siem-storage Deployment)" || fail "siem-storage does not use s3.existingSecret"
 
 # No lane with raw records: no Vector.
-out=$(render --set 'lanes[0].name=k8s' --set 'lanes[0].raw=false' --set ingester.enabled=false)
+out=$(render --set 'lanes[0].name=k8s' --set 'lanes[0].raw=false' --set ingester.enabled=false \
+  --set nats.config.jetstream.fileStore.pvc.size=4Gi)
 [ "$(deployments)" = "$(printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-detection-engine-k8s ci-samma-siem-siem-storage | sort)" ] \
   || fail "raw: false only: $(deployments | tr '\n' ' ')"
 
@@ -311,6 +375,48 @@ render --set-json 'ingester.sources=["google-workspace","slack"]' >/dev/null 2>&
 render --set alertDestination.slack.enabled=true >/dev/null 2>&1 && fail "require_slack rendered with the postgres-only routes"
 render --set alertDestination.messageTimeout=120s >/dev/null 2>&1 && fail "a message timeout at the AckWait rendered"
 render --set-json 'detectionEngine.env={"ENGINE_TRANSPORT":"sqs"}' >/dev/null 2>&1 && fail "the transport was overridden through env"
+
+# Ingester token sources (siem#23): a live one needs its Secret, Cloudflare
+# its account and zones, and the chart's names cannot be overridden.
+ae=(-f "$chart/ci/all-enabled-values.yaml")
+render "${ae[@]}" --set ingester.perSource.slack.existingSecret= >/dev/null 2>&1 && fail "a live Slack ingester rendered without its Secret"
+render "${ae[@]}" --set ingester.perSource.onepassword.replicas=1 --set ingester.perSource.onepassword.existingSecret= >/dev/null 2>&1 && fail "a live 1Password ingester rendered without its Secret"
+render "${ae[@]}" --set ingester.perSource.onepassword.replicas=1 >/dev/null || fail "a live 1Password ingester with its Secret does not render"
+render "${ae[@]}" --set ingester.perSource.cloudflare.existingSecret= >/dev/null 2>&1 && fail "a live Cloudflare ingester rendered without its Secret"
+for k in INGESTER_CLOUDFLARE_ACCOUNT_ID INGESTER_CLOUDFLARE_ZONE_IDS; do
+  render "${ae[@]}" --set "ingester.perSource.cloudflare.env.$k=" >/dev/null 2>&1 && fail "a live Cloudflare ingester rendered without $k"
+done
+render "${ae[@]}" --set ingester.perSource.slack.replicas=2 >/dev/null 2>&1 && fail "two Slack ingester replicas rendered"
+for v in INGESTER_SECRETS INGESTER_SLACK_TOKEN_FILE INGESTER_ONEPASSWORD_TOKEN_FILE INGESTER_CLOUDFLARE_TOKEN_FILE; do
+  render "${ae[@]}" --set-json "ingester.perSource.slack.env={\"$v\":\"x\"}" >/dev/null 2>&1 && fail "$v was overridden through env"
+done
+render "${ae[@]}" --set-json 'lanes=["workspace","slack","onepassword",{"name":"k8s","raw":false}]' >/dev/null 2>&1 && fail "the Cloudflare ingester rendered without its raw lane"
+render "${ae[@]}" --set-json 'lanes=["workspace",{"name":"slack","raw":false},"onepassword","cloudflare"]' >/dev/null 2>&1 && fail "the Slack ingester rendered with a lane without raw records"
+
+# SIEM_RAW's duplicate window (ingester#8): at least 6h plus the Workspace
+# reconcile interval, and never above maxAge.
+render --set streams.raw.duplicateWindow=2h >/dev/null 2>&1 && fail "a 2h SIEM_RAW duplicate window rendered"
+render --set streams.raw.duplicateWindow=7h >/dev/null || fail "a 7h duplicate window with a 1h reconcile interval does not render"
+render --set ingester.reconcileInterval=3h >/dev/null 2>&1 && fail "an 8h window rendered with a 3h reconcile interval"
+render --set ingester.perSource.google-workspace.reconcileInterval=3h >/dev/null 2>&1 && fail "an 8h window rendered with a 3h Workspace reconcile interval"
+render --set ingester.enabled=false --set streams.raw.duplicateWindow=2h >/dev/null || fail "the window is checked without an ingester"
+render --set streams.raw.duplicateWindow=25h >/dev/null 2>&1 && fail "a duplicate window above maxAge rendered"
+
+# SIEM_LOGS's k8s lane cap (siem#24) against the JetStream PVC.
+al=(-f "$chart/ci/all-lanes-values.yaml")
+err=$(render "${al[@]}" --set nats.config.jetstream.fileStore.pvc.size=1Gi 2>&1 >/dev/null || true)
+grep -qF 'add up to 2758 MiB, more than the JetStream file store' <<<"$err" || fail "the k8s lane cap rendered on a 1Gi PVC: $err"
+render "${al[@]}" --set nats.config.jetstream.fileStore.pvc.size=3Gi >/dev/null || fail "the k8s lane cap does not render on a 3Gi PVC"
+render "${al[@]}" --set nats.config.jetstream.fileStore.pvc.size=2700Mi >/dev/null 2>&1 && fail "the caps rendered above a 2700Mi PVC"
+render "${al[@]}" --set nats.config.jetstream.fileStore.maxSize=1Gi >/dev/null 2>&1 && fail "the caps rendered above fileStore.maxSize"
+render "${al[@]}" --set nats.config.jetstream.fileStore.pvc.size=1Gi --set nats.config.jetstream.fileStore.maxSize=3Gi >/dev/null \
+  || fail "fileStore.maxSize does not win over the PVC size"
+render "${al[@]}" --set streams.logs.laneMaxBytes.k8s=300MiB --set nats.config.jetstream.fileStore.pvc.size=1Gi >/dev/null \
+  || fail "a 300MiB k8s cap does not fit a 1Gi PVC"
+render --set streams.logs.maxBytes=1GiB >/dev/null 2>&1 && fail "the default caps rendered above the 1Gi PVC"
+render "${al[@]}" --set nats.config.jetstream.fileStore.pvc.size=1Gi --set nats.enabled=false --set externalNats.url=nats://n:4222 >/dev/null \
+  || fail "an external NATS was held to the bundled PVC"
+render "${al[@]}" --set streams.logs.laneMaxBytes.k8s=2GB >/dev/null 2>&1 && fail "a bad lane cap rendered"
 
 # Storage, Quickwit and Grafana refusals.
 all=(-f "$chart/ci/all-enabled-values.yaml")

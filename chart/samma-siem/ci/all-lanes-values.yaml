@@ -5,3 +5,11 @@ lanes:
   - workspace
   - {name: k8s, raw: false}
   - {name: scanner, raw: false}
+# The k8s lane adds streams.logs.laneMaxBytes.k8s (2GiB) to SIEM_LOGS: the
+# JetStream PVC grows with it (710 MiB + 2GiB of caps).
+nats:
+  config:
+    jetstream:
+      fileStore:
+        pvc:
+          size: 4Gi

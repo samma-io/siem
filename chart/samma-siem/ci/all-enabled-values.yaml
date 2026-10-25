@@ -1,11 +1,23 @@
-# Every workload on: the all-lanes set plus siem-storage on both backends,
-# Quickwit and Grafana. The tags and Secrets are placeholders for the render
+# Every workload on: the all-lanes set plus the token-reading ingester
+# sources and their raw lanes, siem-storage on both backends, Quickwit and
+# Grafana. The tags and Secrets are placeholders for the render
 # only; nothing in CI pulls them. Used by CI (helm lint, helm template,
 # hack/check-chart.sh).
 lanes:
   - workspace
+  - slack
+  - onepassword
+  - cloudflare
   - {name: k8s, raw: false}
   - {name: scanner, raw: false}
+# The k8s lane adds streams.logs.laneMaxBytes.k8s (2GiB) to SIEM_LOGS: the
+# JetStream PVC grows with it (710 MiB + 2GiB of caps).
+nats:
+  config:
+    jetstream:
+      fileStore:
+        pvc:
+          size: 4Gi
 storage:
   enabled: true
   backends: [postgres, s3]
@@ -18,7 +30,9 @@ grafana:
   enabled: true
   tag: ci-placeholder
   existingSecret: siem-grafana
-# Vector into Quickwit, logs and alerts (consumer vector-alerts-quickwit).
+# Vector into Quickwit: Workspace logs, alerts (consumer
+# vector-alerts-quickwit) and the k8s and scanner lanes (consumers
+# vector-quickwit-k8s, vector-quickwit-scanner).
 vector:
   quickwitAlerts: true
 # Slack and GitHub routes with their token Secret (keys slack-token,
@@ -37,3 +51,17 @@ alertDestination:
       - {level: "*", log_source: "*", deliveries: [{to: postgres, target: siem_alerts}]}
     default:
       deliveries: [{to: postgres, target: siem_alerts}]
+# Every ingester source. slack and cloudflare live (their Secrets, key
+# token, at the perSource defaults ingester-slack, ingester-cloudflare),
+# onepassword at replicas: 0. The token files need an ingester from b4c844c.
+ingester:
+  tag: b4c844c
+  sources: [google-workspace, slack, onepassword, cloudflare]
+  perSource:
+    slack:
+      replicas: 1
+    cloudflare:
+      replicas: 1
+      env:
+        INGESTER_CLOUDFLARE_ACCOUNT_ID: 0123456789abcdef0123456789abcdef
+        INGESTER_CLOUDFLARE_ZONE_IDS: 0123456789abcdef0123456789abcdef

@@ -6,13 +6,17 @@ records. The config is baked into the image; this selects it.
 */ -}}
 {{- $raw := list -}}
 {{- range include "samma-siem.lanes" . | fromJsonArray }}{{ if .raw }}{{ $raw = append $raw .name }}{{ end }}{{ end -}}
+{{- /* Refuses the k8s or scanner overlay without the workspace raw lane. */ -}}
+{{- $_ := include "samma-siem.vectorQuickwitLanes" . -}}
 {{- if $raw }}
 {{- $v := .Values.vector }}
 {{- /*
 With quickwit.enabled the overlays of the image feed this release's
-Quickwit: vector-k8s-quickwit.yaml (logs-saas, best-effort) and, with
+Quickwit: vector-k8s-quickwit.yaml (logs-saas, best-effort); with
 vector.quickwitAlerts, vector-k8s-quickwit-alerts.yaml (alerts, consumer
-vector-alerts-quickwit on SIEM_ALERTS, created by the streams Job).
+vector-alerts-quickwit on SIEM_ALERTS); and for the k8s and scanner lanes in
+lanes, vector-k8s-quickwit-<lane>.yaml (logs-<lane>, best-effort, consumer
+vector-quickwit-<lane> on SIEM_LOGS). The streams Job creates the consumers.
 */}}
 {{- $alerts := include "samma-siem.vectorQuickwitAlerts" . }}
 {{- $config := list $v.configPath }}
@@ -20,6 +24,9 @@ vector-alerts-quickwit on SIEM_ALERTS, created by the streams Job).
 {{- $config = append $config "/etc/vector/vector-k8s-quickwit.yaml" }}
 {{- if $alerts }}
 {{- $config = append $config "/etc/vector/vector-k8s-quickwit-alerts.yaml" }}
+{{- end }}
+{{- range include "samma-siem.vectorQuickwitLanes" . | fromJsonArray }}
+{{- $config = append $config (printf "/etc/vector/vector-k8s-quickwit-%s.yaml" .) }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1

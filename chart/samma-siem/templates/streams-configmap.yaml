@@ -15,16 +15,64 @@ siem/00-streams-job.yaml creates, so this chart and that Job agree.
 {{- end -}}
 {{- $s := .Values.streams -}}
 {{- $streams := list
-  (dict "name" "SIEM_RAW" "subjects" $raw "retention" "limits" "spec" $s.raw)
-  (dict "name" "SIEM_LOGS" "subjects" $logs "retention" "limits" "spec" $s.logs)
-  (dict "name" "SIEM_ALERTS" "subjects" (list "samma.alerts.>") "retention" "limits" "spec" $s.alerts)
-  (dict "name" "INGESTER_SLICES" "subjects" (list "samma.ingester.slices.>") "retention" "workqueue" "spec" $s.ingesterSlices)
+  (dict "name" "SIEM_RAW" "subjects" $raw "retention" "limits" "spec" $s.raw "bytes" (include "samma-siem.bytes" $s.raw.maxBytes))
+  (dict "name" "SIEM_LOGS" "subjects" $logs "retention" "limits" "spec" $s.logs "bytes" (include "samma-siem.logsMaxBytes" .))
+  (dict "name" "SIEM_ALERTS" "subjects" (list "samma.alerts.>") "retention" "limits" "spec" $s.alerts "bytes" (include "samma-siem.bytes" $s.alerts.maxBytes))
+  (dict "name" "INGESTER_SLICES" "subjects" (list "samma.ingester.slices.>") "retention" "workqueue" "spec" $s.ingesterSlices "bytes" (include "samma-siem.bytes" $s.ingesterSlices.maxBytes))
 -}}
+{{- /*
+The byte caps of the streams this renders must fit the JetStream file store
+of the bundled NATS: fileStore.maxSize, which the nats chart defaults to the
+PVC size. Checked only when the chart knows it: nats.enabled with a file
+store whose maxSize, or else PVC size, is a plain quantity.
+*/ -}}
+{{- $sum := 0 -}}
+{{- range $streams }}
+{{- if .subjects }}{{ $sum = add $sum (.bytes | int64) }}{{ end -}}
+{{- if gt (include "samma-siem.nanos" .spec.duplicateWindow | int64) (include "samma-siem.nanos" .spec.maxAge | int64) -}}
+{{- fail (printf "%s: duplicateWindow (%s) must not exceed maxAge (%s); JetStream refuses it" .name (toString .spec.duplicateWindow) (toString .spec.maxAge)) -}}
+{{- end -}}
+{{- end -}}
+{{- $js := .Values.nats.config.jetstream | default dict -}}
+{{- $fs := $js.fileStore | default dict -}}
+{{- $pvc := $fs.pvc | default dict -}}
+{{- $limit := "" -}}{{- $what := "" -}}
+{{- if $fs.maxSize -}}
+{{- $limit = toString $fs.maxSize -}}{{- $what = "nats.config.jetstream.fileStore.maxSize" -}}
+{{- else if $pvc.enabled -}}
+{{- $limit = toString ($pvc.size | default "") -}}{{- $what = "nats.config.jetstream.fileStore.pvc.size" -}}
+{{- end -}}
+{{- if and .Values.nats.enabled $js.enabled $fs.enabled $limit -}}
+{{- with include "samma-siem.quantityBytes" $limit -}}
+{{- if gt ($sum | int64) (. | int64) -}}
+{{- fail (printf "the stream byte caps add up to %d MiB, more than the JetStream file store (%s %s): grow the PVC with the caps (streams.*.maxBytes, streams.logs.laneMaxBytes)" (div $sum 1048576) $what $limit) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+SIEM_RAW's duplicate window must cover the furthest a Workspace reconcile
+pass re-reads: the longest application lookback (6h) plus the source's
+reconcile interval. Checked when the interval is a whole number with s, m,
+h or d.
+*/ -}}
+{{- if and .Values.ingester.enabled $raw (has "google-workspace" (.Values.ingester.sources | default list)) -}}
+{{- $cfg := get (.Values.ingester.perSource | default dict) "google-workspace" | default dict -}}
+{{- $interval := toString (hasKey $cfg "reconcileInterval" | ternary $cfg.reconcileInterval .Values.ingester.reconcileInterval) -}}
+{{- if regexMatch "^[0-9]+[smhd]$" $interval -}}
+{{- $reach := add (include "samma-siem.nanos" "6h" | int64) (include "samma-siem.nanos" $interval | int64) -}}
+{{- if lt (include "samma-siem.nanos" $s.raw.duplicateWindow | int64) ($reach | int64) -}}
+{{- fail (printf "streams.raw.duplicateWindow (%s) must cover a Workspace reconcile pass's reach, the 6h longest lookback plus the %s reconcile interval: shorter, records re-read after it are stored again and alert twice (samma-io/ingester#8)" (toString $s.raw.duplicateWindow) $interval) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $c := .Values.consumers -}}
 {{- $consumers := list (dict "stream" "SIEM_ALERTS" "name" "alert-destination" "filter" "samma.alerts.>" "ackWait" $c.ackWait.alertDestination) -}}
 {{- range $lanes -}}
 {{- if .raw }}{{ $consumers = append $consumers (dict "stream" "SIEM_RAW" "name" (printf "vector-%s" .name) "filter" (printf "samma.raw.%s" .name) "ackWait" $c.ackWait.vector) }}{{ end -}}
 {{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" (printf "detection-engine-%s" .name) "filter" (printf "samma.logs.%s" .name) "ackWait" $c.ackWait.detectionEngine) -}}
+{{- end -}}
+{{- range include "samma-siem.vectorQuickwitLanes" . | fromJsonArray -}}
+{{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" (printf "vector-quickwit-%s" .) "filter" (printf "samma.logs.%s" .) "ackWait" $c.ackWait.vectorQuickwitLogs) -}}
 {{- end -}}
 {{- if include "samma-siem.vectorQuickwitAlerts" . -}}
 {{- $consumers = append $consumers (dict "stream" "SIEM_ALERTS" "name" "vector-alerts-quickwit" "filter" "samma.alerts.>" "ackWait" $c.ackWait.vectorAlertsQuickwit) -}}
@@ -72,7 +120,7 @@ data:
       "max_consumers": -1,
       "max_msgs_per_subject": -1,
       "max_msgs": -1,
-      "max_bytes": {{ include "samma-siem.bytes" .spec.maxBytes }},
+      "max_bytes": {{ .bytes }},
       "max_age": {{ include "samma-siem.nanos" .spec.maxAge }},
       "max_msg_size": -1,
       "storage": "file",

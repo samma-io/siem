@@ -57,7 +57,9 @@ helm upgrade --install samma-siem chart/samma-siem -n samma \
 ```
 
 The streams Job then edits the streams that `samma-io/deploy` `siem/00-streams-job.yaml`
-created. With the default values the configs are identical, so nothing changes.
+created. With the default values the configs are identical except `SIEM_RAW`'s
+duplicate window, which that Job sets to 2h and this chart to 8h (see "Streams and
+consumers"); the Job edits it to 8h.
 
 ## Lanes
 
@@ -95,6 +97,28 @@ Adding a lane is a values change and an upgrade. The Job adds the subject to the
 stream and creates the consumers. Size the stream's byte cap for the new lane's
 volume.
 
+**The k8s lane's byte cap.** `streams.logs.laneMaxBytes.<lane>` is added to
+`SIEM_LOGS`'s `max_bytes` for each lane in `lanes` that has one. The default is
+`k8s: 2GiB`, about three hours of the ~11 MiB/min audit volume. JetStream caps a
+stream, not a subject, so this is room in the one `SIEM_LOGS` stream: once it is
+full the oldest records go, whatever their lane, and at full audit volume
+`SIEM_LOGS` (Workspace included) keeps about three hours instead of `maxAge`.
+siem-storage's Postgres and S3 copies are the long-term ones. **The JetStream PVC
+must grow with the cap**: with `k8s` the caps add up to 710 MiB + 2GiB, so set
+`nats.config.jetstream.fileStore.pvc.size` to `4Gi`. With `nats.enabled` the chart
+refuses caps that add up to more than `fileStore.maxSize`, or else the PVC size.
+On an installed release the NATS StatefulSet's claim template cannot change:
+expand the PVC itself (`kubectl patch pvc`, a StorageClass with
+`allowVolumeExpansion`), delete the StatefulSet with `--cascade=orphan`, then
+upgrade.
+
+**Raw lanes Vector does not read yet.** The `slack`, `onepassword` and
+`cloudflare` sources need their lanes with raw records, which also gives each a
+`vector-<lane>` consumer on `SIEM_RAW`. The baked Vector config (`vector-k8s.yaml`)
+filters only `workspace`, so those lanes' records are not normalised: they stay
+unfiltered in `SIEM_RAW` until its `maxAge`, and nothing reaches their
+`samma.logs.<lane>` or detection-engine until a Vector image reads them.
+
 ## Streams and consumers
 
 The ConfigMap `<release>-streams` holds one JSON config per stream
@@ -117,16 +141,32 @@ ServiceAccount and ConfigMap. Helm ignores the ArgoCD annotations, so a plain
 
 | Stream | Retention | `maxAge` | `maxBytes` | `duplicateWindow` |
 |---|---|---|---|---|
-| `SIEM_RAW` | limits, discard old | 24h | 100MiB | 2h |
-| `SIEM_LOGS` | limits, discard old | 7d | 400MiB | 2m |
+| `SIEM_RAW` | limits, discard old | 24h | 100MiB | 8h |
+| `SIEM_LOGS` | limits, discard old | 7d | 400MiB, plus `laneMaxBytes` (`k8s`: 2GiB) | 2m |
 | `SIEM_ALERTS` | limits, discard old | 30d | 200MiB | 2m |
 | `INGESTER_SLICES` | work queue | 24h | 10MiB | 2h |
 
 All streams are file storage with one replica. These are the numbers running on
-v2. **The byte caps must fit the JetStream PVC.** They add up to 710 MiB against
-the 1Gi default of `nats.config.jetstream.fileStore.pvc.size`. Raise the caps and
-the PVC together, never the caps alone. A work-queue stream's retention cannot be
-changed after it is created.
+v2, except `SIEM_RAW`'s duplicate window. **The byte caps must fit the JetStream
+PVC.** They add up to 710 MiB against the 1Gi default of
+`nats.config.jetstream.fileStore.pvc.size` (2758 MiB with the `k8s` lane, see
+"Lanes"). Raise the caps and the PVC together, never the caps alone; the chart
+refuses a sum above it. A work-queue stream's retention cannot be changed after it
+is created.
+
+**`SIEM_RAW`'s duplicate window is 8h.** The ingester republishes every record a
+reconcile pass re-reads with the same `Nats-Msg-Id`, and JetStream drops the copy
+only inside the window. A Workspace pass re-reads `[previous pass's end - lookback,
+now]`; the longest lookback is 6h (`token`, `groups`, `groups_enterprise`,
+`calendar`, `user_accounts`; `drive` 3h), so a record is re-read up to 6h plus one
+reconcile interval (1h) after its event. With the old 2h window those late
+re-reads were stored again under a new stream sequence and alerted twice
+(samma-io/ingester#8). 8h is 6h + 1h + 1h of margin. The chart refuses
+`streams.raw.duplicateWindow` below 6h plus the Workspace `reconcileInterval`, and
+any stream's window above its `maxAge`. JetStream keeps the id of every record in
+the window in memory, so the cost grows with the window. The longer window also
+means a reconcile pass never replaces a record Vector lost (samma-io/vector
+README, "What the ingester's reconcile pass recovers").
 
 The consumers are durable pull consumers, explicit ack, deliver all,
 `maxDeliver` 5. When a message exhausts `maxDeliver`, it stays in the stream
@@ -143,6 +183,7 @@ is the DLQ of this transport.
 | `storage-s3-logs` | `storageS3Logs` | 6m | above `storage.s3.flushInterval` (5m): a message is acked only once its object is written. The chart refuses an AckWait at or below the interval |
 | `storage-s3-alerts` | `storageS3Alerts` | 2m | one object per alert; the service's own value |
 | `vector-alerts-quickwit` | `vectorAlertsQuickwit` | 120s | only with `vector.quickwitAlerts`; above the alerts sink's 5s batch plus 30s request retried for 30s |
+| `vector-quickwit-k8s`, `vector-quickwit-scanner` | `vectorQuickwitLogs` | 60s | only with `quickwit.enabled` and the lane; Vector acks on hand-off, the sinks are best-effort |
 
 The storage consumers exist only with `storage.enabled`, and only for the
 configured `storage.backends`: `storage-logs` (on `SIEM_LOGS`) for `postgres`,
@@ -154,7 +195,10 @@ every other consumer has 1000.
 
 `vector-alerts-quickwit` (on `SIEM_ALERTS`, filter `samma.alerts.>`) exists only
 with `quickwit.enabled`, `vector.quickwitAlerts` and a rendered Vector: Vector's
-alerts overlay reads it and does not start without it.
+alerts overlay reads it and does not start without it. Likewise
+`vector-quickwit-k8s` and `vector-quickwit-scanner` (on `SIEM_LOGS`, filters
+`samma.logs.k8s`, `samma.logs.scanner`) exist only with `quickwit.enabled`,
+`vector.enabled` and that lane in `lanes`.
 
 ## Workloads
 
@@ -169,7 +213,7 @@ deployment running on v2 (`samma-io/deploy` `siem/`).
 | Deployment | One per | Reads | Writes | Notes |
 |---|---|---|---|---|
 | `<release>-ingester-<source>` | entry of `ingester.sources` | `INGESTER_SLICES` (`ingester-<source>`) | `samma.raw.<lane>`, `ingester_checkpoint` | `daemon`, `INGESTER_TRANSPORT=nats`, `Recreate`, at most one replica |
-| `<release>-vector` | release, if a lane has raw records | `SIEM_RAW` (`vector-<lane>`); with `vector.quickwitAlerts` also `SIEM_ALERTS` (`vector-alerts-quickwit`) | `samma.logs.<lane>`; with `quickwit.enabled` also Quickwit | `--config /etc/vector/vector-k8s.yaml`, the config baked into the image, plus the Quickwit overlays (see "Quickwit") |
+| `<release>-vector` | release, if a lane has raw records | `SIEM_RAW` (`vector-<lane>`); with `vector.quickwitAlerts` also `SIEM_ALERTS` (`vector-alerts-quickwit`); with `quickwit.enabled` and the k8s or scanner lane also `SIEM_LOGS` (`vector-quickwit-<lane>`) | `samma.logs.<lane>`; with `quickwit.enabled` also Quickwit | `--config /etc/vector/vector-k8s.yaml`, the config baked into the image, plus the Quickwit overlays (see "Quickwit") |
 | `<release>-detection-engine-<lane>` | entry of `lanes` | `SIEM_LOGS` (`detection-engine-<lane>`) | `samma.alerts.<lane>` | `ENGINE_TRANSPORT=nats`, rules baked in at `/rules`, ClusterIP Service on `:9090` |
 | `<release>-alert-destination` | release | `SIEM_ALERTS` (`alert-destination`) | `siem_alerts`, `alert_ledger`; Slack and GitHub when routed | `ALERTDEST_TRANSPORT=nats`, routes from ConfigMap `<release>-alert-routes`, tokens from `alertDestination.existingSecret` |
 | `<release>-siem-storage` | release, `storage.enabled` | `SIEM_LOGS` (`storage-logs`, `storage-s3-logs`), `SIEM_ALERTS` (`storage-s3-alerts`) | `siem_events`, the S3 archive | `STORAGE_BACKENDS=postgres,s3`, binds to the Job's consumers |
@@ -186,8 +230,8 @@ are the tags running on v2:
 
 | Component | Tag | Note |
 |---|---|---|
-| `ingester` | `89ed408` | NATS transport (ingester#5) |
-| `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane; no Quickwit overlays (needs `34806c1` or later with `quickwit.enabled`) |
+| `ingester` | `89ed408` | NATS transport (ingester#5); no token files (Slack, 1Password and Cloudflare need `b4c844c` or later) |
+| `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane; no Quickwit overlays (needs `34806c1` or later with `quickwit.enabled`, `5fbdb00` or later with it and the k8s or scanner lane) |
 | `detectionEngine` | `d5d7439` | NATS transport; knows the SaaS lanes only |
 | `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination; no Slack or GitHub (needs `e9987eb` or later to route to them) |
 | `storage` | `sha-6c3f143` | siem-storage `main` with the Postgres and S3 backends, built by its CI |
@@ -200,15 +244,14 @@ are in detection-engine `main` from `0c5b5ce` on, and `d5d7439` refuses
 before adding them. The baked Vector config reads only `vector-workspace`, so a
 raw lane other than `workspace` needs a Vector image whose config reads it.
 With `quickwit.enabled`, Vector gets the Quickwit overlays, which are in
-samma-io/vector `main` from `34806c1` on; `f2f2dea` does not have the files and
-would not start. Routing alerts to Slack or GitHub needs alert-destination
+samma-io/vector `main` from `34806c1` on (the k8s and scanner ones from `5fbdb00`
+on); `f2f2dea` does not have the files and would not start. Routing alerts to Slack or GitHub needs alert-destination
 `main` from `e9987eb` on; `779befa` refuses such a table.
 
 **Ingester sources.** A source publishes to `samma.raw.<lane>` (`workspace` for
 `google-workspace`), so its lane must be in `lanes` with raw records; the chart
-refuses to render otherwise. Only `google-workspace` works on Kubernetes so far:
-Slack, 1Password and Cloudflare still read their token from SSM. The Workspace
-ingester ships at `replicas: 0`. To go live:
+refuses to render otherwise. Every source ships at `replicas: 0`. To take the
+Workspace ingester live:
 
 1. Create the Secret named in `ingester.perSource.google-workspace.existingSecret`
    (default `ingester-google`, key `key.json`): a service-account key that may
@@ -217,6 +260,28 @@ ingester ships at `replicas: 0`. To go live:
 2. Set `ingester.perSource.google-workspace.env.INGESTER_GWS_SUBJECT` and
    `INGESTER_GCP_TARGET_SERVICE_ACCOUNT`, and `replicas: 1`. The chart refuses
    `replicas: 1` without them, and more than one replica.
+
+`slack`, `onepassword` and `cloudflare` read a token from a file
+(`samma-io/ingester` README, "Token secrets"), which needs an ingester image from
+`b4c844c` on. Add the source to `ingester.sources` and its lane (`slack`,
+`onepassword`, `cloudflare`, with raw records) to `lanes`, then:
+
+1. Create the Secret named in `ingester.perSource.<source>.existingSecret`
+   (defaults `ingester-slack`, `ingester-onepassword`, `ingester-cloudflare`) with
+   the token under the key `token`:
+   `kubectl -n <namespace> create secret generic ingester-slack --from-file=token=./slack-token`.
+   With `existingSecret` set the chart sets `INGESTER_SECRETS=file` and
+   `INGESTER_<SOURCE>_TOKEN_FILE=/var/run/secrets/ingester/token`.
+2. For Cloudflare, set `ingester.perSource.cloudflare.env.INGESTER_CLOUDFLARE_ACCOUNT_ID`
+   and `INGESTER_CLOUDFLARE_ZONE_IDS` (1 to 10, comma-separated); for 1Password,
+   `INGESTER_ONEPASSWORD_BASE_URL` if the account is not in the US region.
+3. Set `replicas: 1`. The chart refuses it without `existingSecret`, and for
+   Cloudflare without the account and zone ids.
+
+`INGESTER_SECRETS` and the three `*_TOKEN_FILE` names are the chart's; setting
+them in `env` is refused. `*_TOKEN_PARAM` is left alone: the ingester refuses it
+under file mode at start. Until a Vector image reads those lanes their records
+are not normalised (see "Lanes").
 
 **Routes.** The default table sends everything to the `postgres` destination,
 table `siem_alerts`, with `require_slack: false`. `alertDestination.routes`
@@ -248,7 +313,7 @@ without `existingSecret`. Tokens never go in values.
 **Extra env.** `vector.env`, `detectionEngine.env`, `alertDestination.env` and
 `storage.env`, `quickwit.env`, `grafana.env` and
 `ingester.perSource.<source>.env` take `NAME: value` settings from the service's
-README. A name the chart sets (the transport, NATS, Postgres, routes, token files, `QUICKWIT_URL`) is refused,
+README. A name the chart sets (the transport, NATS, Postgres, routes, token files, `INGESTER_SECRETS`, `QUICKWIT_URL`) is refused,
 and an empty value is left out.
 
 ## Storage, search and dashboards
@@ -303,6 +368,19 @@ quickwit:
   the alerts wait in the stream. Both need a Vector image from `34806c1` on
   (samma-io/vector README, "Quickwit (optional)"). `vector.quickwitAlerts`
   without `quickwit.enabled` is refused.
+- **The k8s and scanner lanes.** For each of them in `lanes`, Vector also gets
+  `vector-k8s-quickwit-<lane>.yaml` (into `logs-k8s`, `logs-scanner`,
+  best-effort), reading consumer `vector-quickwit-<lane>` on `SIEM_LOGS`, which the
+  streams Job creates (AckWait `consumers.ackWait.vectorQuickwitLogs`). They need
+  a Vector image from `5fbdb00` on. These overlays layer on the base config and
+  `vector-k8s-quickwit.yaml` (its Prometheus exporter) and cannot run alone, and
+  the base config reads `vector-workspace` on `SIEM_RAW`, without which Vector does
+  not start. A base config without the Workspace lane would be a new file in the
+  Vector image, so the chart instead **requires the `workspace` lane, with raw
+  records, whenever it would load the k8s or scanner overlay**, and refuses
+  otherwise; set `vector.enabled: false` for a release without it. Records reach
+  `samma.logs.k8s` and `samma.logs.scanner` only once something publishes there
+  (the scanner relay and k8s audit collection are not in this chart).
 
 ### Grafana
 
@@ -397,7 +475,7 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | `lanes` | `[workspace]` | Deployed lanes, see "Lanes" |
 | `ingester.sources` | `[google-workspace]` | Ingester sources with a slice consumer |
 | `nats.enabled` | `true` | Install the `nats` chart (2.15.0) with JetStream |
-| `nats.config.jetstream.fileStore.pvc.size` | `1Gi` | JetStream PVC; must hold the stream caps |
+| `nats.config.jetstream.fileStore.pvc.size` | `1Gi` | JetStream PVC; must hold the stream caps (`4Gi` with the `k8s` lane) |
 | `nats.config.jetstream.fileStore.pvc.storageClassName` | empty | StorageClass of the PVC |
 | `nats.natsBox.enabled` | `false` | The upstream chart's always-on nats-box Deployment |
 | `nats.*` | | Passed to the [nats chart](https://github.com/nats-io/k8s/tree/main/helm/charts/nats) |
@@ -405,7 +483,8 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | `streams.enabled` | `true` | Render the streams ConfigMap and Job |
 | `streams.{raw,logs,alerts,ingesterSlices}.maxAge` | see table | Whole number with `s`, `m`, `h` or `d` |
 | `streams.{raw,logs,alerts,ingesterSlices}.maxBytes` | see table | Whole number with `B`, `KiB`, `MiB`, `GiB` or `TiB` |
-| `streams.{raw,logs,alerts,ingesterSlices}.duplicateWindow` | see table | Duration as above |
+| `streams.{raw,logs,alerts,ingesterSlices}.duplicateWindow` | see table | Duration as above; `raw` at least 6h plus the Workspace `reconcileInterval` |
+| `streams.logs.laneMaxBytes` | `{k8s: 2GiB}` | Added to `SIEM_LOGS`'s cap per lane in `lanes`; grow the PVC with it |
 | `consumers.maxDeliver` | `5` | Deliveries before a message is given up |
 | `consumers.ackWait.*` | see table | Per consumer kind |
 | `natsBox.image`, `.tag`, `.digest` | `natsio/nats-box` `0.18.1` + digest | Image of the streams Job; a digest wins over the tag |
@@ -438,9 +517,9 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | `alertDestination.slack.enabled` | `false` | `require_slack`; needs `routes`, `existingSecret` and an image from `e9987eb` on |
 | `alertDestination.existingSecret` | empty | Secret with keys `slack-token`, `github-token`; required when Slack or GitHub is routed |
 | `ingester.replicas`, `.scheduleInterval`, `.reconcileInterval` | `0`, `10m`, `1h` | Defaults for every source |
-| `ingester.perSource.<source>.replicas` | `0` for `google-workspace` | 0 or 1 |
-| `ingester.perSource.<source>.existingSecret`, `.secretOptional` | `ingester-google`, `true` | Credential Secret of the source |
-| `ingester.perSource.<source>.env` | Workspace subject and service account, empty | Extra `INGESTER_*` settings |
+| `ingester.perSource.<source>.replicas` | `0` | 0 or 1 |
+| `ingester.perSource.<source>.existingSecret`, `.secretOptional` | `ingester-<google, slack, onepassword, cloudflare>`, `true` | Credential Secret of the source (key `key.json` for Workspace, `token` for the others) |
+| `ingester.perSource.<source>.env` | Workspace subject and service account, 1Password base URL, Cloudflare account and zone ids, empty | Extra `INGESTER_*` settings |
 | `storage.backends` | `[postgres, s3]` | `STORAGE_BACKENDS`; also which storage consumers exist |
 | `storage.batchSize`, `.batchWait` | `100`, `1s` | Postgres batches |
 | `storage.eventsRetention` | `30 days` | TimescaleDB retention of `siem_events` |
