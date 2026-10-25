@@ -302,3 +302,29 @@ samma-siem.quickwitUrl: the in-cluster REST base of the quickwit Service.
 {{- define "samma-siem.quickwitUrl" -}}
 http://{{ include "samma-siem.workloadName" (dict "root" . "suffix" "quickwit") }}.{{ .Release.Namespace }}.svc:7280
 {{- end -}}
+
+{{- /*
+ArgoCD ordering. Helm runs the streams and bucket Jobs as post-install and
+post-upgrade hooks, which ArgoCD would map to PostSync, after the workloads
+had already started and crash-looped on missing consumers. Under ArgoCD the
+Jobs are Sync hooks instead, and the sync goes in three waves:
+
+  0  NATS, MinIO and everything else (ConfigMaps, Secrets, Services)
+  1  the streams and bucket Jobs (samma-siem.argocdJobHook)
+  2  this chart's Deployments (samma-siem.argocdWorkloadWave)
+
+The subcharts stay in the default wave 0: the MinIO chart cannot annotate
+its Secret, ServiceAccount or ConfigMap, so a negative wave on its Deployment
+would leave it waiting for them. ArgoCD ignores the helm.sh/hook annotations
+when argocd.argoproj.io/hook is set, and Helm ignores these, so a plain
+`helm install` still runs the Jobs as post-install/post-upgrade hooks.
+*/ -}}
+{{- define "samma-siem.argocdJobHook" -}}
+argocd.argoproj.io/hook: Sync
+argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+argocd.argoproj.io/sync-wave: "1"
+{{- end -}}
+
+{{- define "samma-siem.argocdWorkloadWave" -}}
+argocd.argoproj.io/sync-wave: "2"
+{{- end -}}

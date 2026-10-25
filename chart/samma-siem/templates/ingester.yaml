@@ -38,6 +38,8 @@ metadata:
     {{- include "samma-siem.labels" $ | nindent 4 }}
     app.kubernetes.io/component: ingester
     siem.samma.io/instance: {{ $source }}
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" $ | nindent 4 }}
 spec:
   replicas: {{ $replicas }}
   # Never two at once: they would contend for the same leases.

@@ -20,6 +20,8 @@ metadata:
     {{- include "samma-siem.labels" $ | nindent 4 }}
     app.kubernetes.io/component: detection-engine
     siem.samma.io/instance: {{ $lane.name }}
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" $ | nindent 4 }}
 spec:
   replicas: {{ $v.replicas }}
   selector:

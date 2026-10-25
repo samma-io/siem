@@ -20,6 +20,8 @@ metadata:
   labels:
     {{- include "samma-siem.labels" . | nindent 4 }}
     app.kubernetes.io/component: alert-destination
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
 spec:
   replicas: {{ $v.replicas }}
   selector:

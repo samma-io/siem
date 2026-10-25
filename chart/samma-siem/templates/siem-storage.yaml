@@ -22,6 +22,7 @@ metadata:
     {{- include "samma-siem.labels" . | nindent 4 }}
     app.kubernetes.io/component: siem-storage
   annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
     siem.samma.io/backends: {{ join "," $backends | quote }}
 spec:
   replicas: {{ $v.replicas }}

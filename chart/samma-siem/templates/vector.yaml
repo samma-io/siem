@@ -17,6 +17,7 @@ metadata:
     {{- include "samma-siem.labels" . | nindent 4 }}
     app.kubernetes.io/component: vector
   annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
     # The raw lanes this release expects Vector to read.
     siem.samma.io/raw-lanes: {{ join "," $raw | quote }}
 spec:

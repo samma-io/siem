@@ -105,6 +105,16 @@ It creates what is missing and edits what exists to match, so running it again
 changes nothing. It runs nats-box, pinned by digest, as a non-root user with a
 read-only root filesystem, no capabilities and the RuntimeDefault seccomp profile.
 
+**Under ArgoCD.** ArgoCD maps Helm's post-install/post-upgrade hooks to
+PostSync, which would start the workloads before their consumers exist. The
+streams and bucket Jobs therefore also carry `argocd.argoproj.io/hook: Sync`, and
+the sync runs in waves: wave 0 is NATS, MinIO and every ConfigMap, Secret and
+Service; wave 1 the two Jobs; wave 2 this chart's Deployments. ArgoCD waits for
+each wave to be healthy, and for the Jobs to complete, before the next. The
+subcharts stay in wave 0 because the minio chart cannot annotate its Secret,
+ServiceAccount and ConfigMap. Helm ignores the ArgoCD annotations, so a plain
+`helm install` behaves as before.
+
 | Stream | Retention | `maxAge` | `maxBytes` | `duplicateWindow` |
 |---|---|---|---|---|
 | `SIEM_RAW` | limits, discard old | 24h | 100MiB | 2h |
