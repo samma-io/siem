@@ -15,6 +15,7 @@ metadata:
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "0"
     helm.sh/hook-delete-policy: before-hook-creation
+    {{- include "samma-siem.argocdJobHook" . | nindent 4 }}
 spec:
   # Restarts with back-off while MinIO starts (10s, 20s, ... about 10 minutes).
   backoffLimit: 6

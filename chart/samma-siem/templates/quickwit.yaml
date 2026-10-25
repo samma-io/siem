@@ -28,6 +28,8 @@ metadata:
   labels:
     {{- include "samma-siem.labels" . | nindent 4 }}
     app.kubernetes.io/component: quickwit
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
 spec:
   replicas: {{ $v.replicas }}
   # One node at a time: the old one stops before the new one starts.

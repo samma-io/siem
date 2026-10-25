@@ -81,6 +81,31 @@ grep -qE 'type: (NodePort|LoadBalancer)' <<<"$out" && fail "render exposes a Ser
 grep -qF 'name: ci-samma-siem-streams' <<<"$out" || fail "no streams Job"
 grep -qF 'name: ci-samma-siem-bucket' <<<"$out" || fail "no bucket Job"
 
+# Under ArgoCD the Jobs are Sync hooks in wave 1, after NATS and MinIO (wave
+# 0) and before the Deployments (wave 2); the Helm hooks stay for helm install.
+for job in ci-samma-siem-streams ci-samma-siem-bucket; do
+  d=$(doc "$job" Job)
+  for want in 'helm.sh/hook: post-install,post-upgrade' 'helm.sh/hook-delete-policy: before-hook-creation' \
+    'argocd.argoproj.io/hook: Sync' 'argocd.argoproj.io/hook-delete-policy: BeforeHookCreation' \
+    'argocd.argoproj.io/sync-wave: "1"'
+  do
+    grep -qF -- "$want" <<<"$d" || fail "Job $job lacks $want"
+  done
+done
+# check_waves: every Deployment of this chart is in wave 2, nothing else in the
+# render (subcharts, ConfigMaps, Secrets, Services) is in a wave of its own.
+check_waves() {
+  local name
+  for name in $(deployments | grep '^ci-samma-siem-'); do
+    grep -qF 'argocd.argoproj.io/sync-wave: "2"' <<<"$(doc "$name" Deployment)" || fail "Deployment $name is not in sync wave 2"
+  done
+  grep -qF 'argocd.argoproj.io/sync-wave' <<<"$(doc ci-minio Deployment)" && fail "the MinIO Deployment has a sync wave"
+  [ "$(grep -c 'argocd.argoproj.io/sync-wave' <<<"$out")" = "$(( $(deployments | grep -c '^ci-samma-siem-') + $(grep -c 'argocd.argoproj.io/hook: Sync' <<<"$out") ))" ] \
+    || fail "a resource other than the Jobs and Deployments has a sync wave"
+  return 0
+}
+check_waves
+
 # The workloads with the default values: one lane, one ingester source.
 nats='value: "nats://ci-nats.samma.svc:4222"'
 want_deps=$(printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-detection-engine-workspace \
@@ -155,6 +180,7 @@ want_deps=$(printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem
   ci-samma-siem-detection-engine-scanner ci-samma-siem-detection-engine-workspace ci-samma-siem-grafana \
   ci-samma-siem-ingester-google-workspace ci-samma-siem-quickwit ci-samma-siem-siem-storage ci-samma-siem-vector | sort)
 [ "$(deployments)" = "$want_deps" ] || fail "all-enabled Deployments: $(deployments | tr '\n' ' ')"
+check_waves
 want_svcs=$(printf '%s\n' ci-samma-siem-detection-engine-k8s ci-samma-siem-detection-engine-scanner \
   ci-samma-siem-detection-engine-workspace ci-samma-siem-grafana ci-samma-siem-quickwit | sort)
 [ "$(services)" = "$want_svcs" ] || fail "all-enabled Services: $(services | tr '\n' ' ')"
