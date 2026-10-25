@@ -26,7 +26,10 @@ jobs:
 
       # charts/*.tgz is not committed; Chart.lock pins the exact versions.
       - name: helm dependency build
-        run: helm dependency build chart/samma-siem
+        run: |
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+          helm repo add minio https://charts.min.io/
+          helm dependency build chart/samma-siem
 
       - name: helm lint
         run: helm lint --strict chart/samma-siem

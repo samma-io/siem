@@ -24,6 +24,8 @@ The dependencies are pinned in `Chart.yaml` and `Chart.lock`. Their archives
 (`charts/*.tgz`) are not committed, so fetch them first:
 
 ```bash
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+helm repo add minio https://charts.min.io/
 helm dependency build chart/samma-siem
 helm upgrade --install samma-siem chart/samma-siem -n samma-siem --create-namespace
 kubectl -n samma-siem logs job/samma-siem-streams
@@ -167,7 +169,7 @@ Notes:
 ## Checking a change
 
 ```bash
-helm dependency build chart/samma-siem
+helm dependency build   # after the two `helm repo add` above chart/samma-siem
 helm lint --strict chart/samma-siem
 helm template ci chart/samma-siem --namespace samma
 hack/check-chart.sh            # the render has the streams and consumers
