@@ -34,8 +34,11 @@ This starts the SIEM engine alongside a NATS server. Rules are loaded from a mou
 ```bash
 curl -X POST http://localhost:8080/ingest \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer devtoken" \
   -d '{"type": "nmap", "target": "10.0.0.1", "port": 22}'
 ```
+
+`/ingest` requires a bearer token configured via `SIEM_INGEST_TOKENS`; requests without a valid token are rejected with `401 unauthorized`. The `/healthz` endpoint requires no token, so liveness probes keep working. Every published alert carries a `source` field identifying the authenticated sender (e.g. `"source": "dev"`) or the NATS subject the event arrived on.
 
 ## Configuration
 
@@ -45,8 +48,11 @@ All configuration is via environment variables:
 |---|---|---|
 | `SIEM_HTTP_PORT` | `8080` | HTTP server listen port |
 | `SIEM_NATS_URL` | `nats://localhost:4222` | NATS server URL |
+| `SIEM_NATS_USER` | _(empty)_ | NATS username (optional; empty disables NATS auth) |
+| `SIEM_NATS_PASSWORD` | _(empty)_ | NATS password (optional) |
 | `SIEM_NATS_SUBSCRIBE` | _(empty)_ | Comma-separated NATS subjects to subscribe to |
 | `SIEM_RULES_DIR` | `./rules` | Directory containing YAML rule files |
+| `SIEM_INGEST_TOKENS` | _(empty)_ | Comma-separated `name=token` pairs for `/ingest` bearer auth (e.g. `scanner-fleet=aaa,ci=bbb`). **Required** — the process refuses to start without at least one token |
 
 ## Writing Rules
 
