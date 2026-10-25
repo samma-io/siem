@@ -1,0 +1,69 @@
+{{- if .Values.minio.enabled }}
+{{- $creds := include "samma-siem.s3Credentials" . | fromJson }}
+# Creates s3.bucket on the bundled MinIO after every install and upgrade.
+# mc mb --ignore-existing leaves an existing bucket alone. The image has no
+# shell: mc reads endpoint and credentials from MC_HOST_s3, built from the
+# Secret by the kubelet's $(VAR) expansion.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "samma-siem.fullname" . }}-bucket
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  # Restarts with back-off while MinIO starts (10s, 20s, ... about 10 minutes).
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "samma-siem.podSecurity" .Values.minioClient | nindent 8 }}
+      containers:
+        - name: mc
+          image: {{ include "samma-siem.image" .Values.minioClient }}
+          imagePullPolicy: {{ .Values.minioClient.pullPolicy }}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: MC_CONFIG_DIR
+              value: /tmp/.mc
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $creds.secret }}
+                  key: {{ $creds.idKey }}
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $creds.secret }}
+                  key: {{ $creds.secretKey }}
+            {{- $endpoint := include "samma-siem.s3Endpoint" . }}
+            {{- $scheme := ternary "https" "http" (hasPrefix "https://" $endpoint) }}
+            - name: MC_HOST_s3
+              value: {{ printf "%s://$(S3_ACCESS_KEY_ID):$(S3_SECRET_ACCESS_KEY)@%s" $scheme (trimPrefix (printf "%s://" $scheme) $endpoint) | quote }}
+          args:
+            - mb
+            - --ignore-existing
+            - --region={{ .Values.s3.region }}
+            - s3/{{ required "s3.bucket is required" .Values.s3.bucket }}
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.minioClient.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,57 @@
+{{- if .Values.streams.enabled }}
+# Creates or edits the streams and consumers from the ConfigMap
+# <release>-streams after every install and upgrade.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "samma-siem.fullname" . }}-streams
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+      annotations:
+        checksum/streams: {{ include (print $.Template.BasePath "/streams-configmap.yaml") . | sha256sum }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "samma-siem.podSecurity" .Values.natsBox | nindent 8 }}
+      containers:
+        - name: nats
+          image: {{ include "samma-siem.image" .Values.natsBox }}
+          imagePullPolicy: {{ .Values.natsBox.pullPolicy }}
+          # The image's WORKDIR is /root, which a non-root uid cannot stat.
+          workingDir: /tmp
+          env:
+            - name: NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            - name: HOME
+              value: /tmp
+          command: [sh, /config/apply.sh]
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.natsBox.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "samma-siem.fullname" . }}-streams
+        - name: tmp
+          emptyDir: {}
+{{- end }}

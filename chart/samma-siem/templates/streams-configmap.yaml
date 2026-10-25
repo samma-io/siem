@@ -1,0 +1,83 @@
+{{- if .Values.streams.enabled }}
+{{- /*
+One JSON config per stream (stream.<NAME>.json) and per consumer
+(consumer.<STREAM>.<name>.json), in the format of `nats stream add --config`
+and `nats consumer add --config`. Durations are nanoseconds and sizes bytes.
+The fields are what `nats ... add --defaults` with the flags of samma-io/deploy
+siem/00-streams-job.yaml creates, so this chart and that Job agree.
+*/ -}}
+{{- $lanes := include "samma-siem.lanes" . | fromJsonArray -}}
+{{- $raw := list -}}
+{{- $logs := list -}}
+{{- range $lanes -}}
+{{- if .raw }}{{ $raw = append $raw (printf "samma.raw.%s" .name) }}{{ end -}}
+{{- $logs = append $logs (printf "samma.logs.%s" .name) -}}
+{{- end -}}
+{{- $s := .Values.streams -}}
+{{- $streams := list
+  (dict "name" "SIEM_RAW" "subjects" $raw "retention" "limits" "spec" $s.raw)
+  (dict "name" "SIEM_LOGS" "subjects" $logs "retention" "limits" "spec" $s.logs)
+  (dict "name" "SIEM_ALERTS" "subjects" (list "samma.alerts.>") "retention" "limits" "spec" $s.alerts)
+  (dict "name" "INGESTER_SLICES" "subjects" (list "samma.ingester.slices.>") "retention" "workqueue" "spec" $s.ingesterSlices)
+-}}
+{{- $c := .Values.consumers -}}
+{{- $consumers := list (dict "stream" "SIEM_ALERTS" "name" "alert-destination" "filter" "samma.alerts.>" "ackWait" $c.ackWait.alertDestination) -}}
+{{- range $lanes -}}
+{{- if .raw }}{{ $consumers = append $consumers (dict "stream" "SIEM_RAW" "name" (printf "vector-%s" .name) "filter" (printf "samma.raw.%s" .name) "ackWait" $c.ackWait.vector) }}{{ end -}}
+{{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" (printf "detection-engine-%s" .name) "filter" (printf "samma.logs.%s" .name) "ackWait" $c.ackWait.detectionEngine) -}}
+{{- end -}}
+{{- range .Values.ingester.sources -}}
+{{- if not (regexMatch "^[a-z0-9]+(-[a-z0-9]+)*$" (toString .)) }}{{ fail (printf "ingester source %q: a lowercase name like google-workspace" (toString .)) }}{{ end -}}
+{{- $consumers = append $consumers (dict "stream" "INGESTER_SLICES" "name" (printf "ingester-%s" .) "filter" (printf "samma.ingester.slices.%s" .) "ackWait" $c.ackWait.ingester) -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "samma-siem.fullname" . }}-streams
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+data:
+  {{- range $streams }}
+  {{- /* A stream with no subjects (every lane raw: false) is not created. */}}
+  {{- if .subjects }}
+  stream.{{ .name }}.json: |
+    {
+      "name": {{ .name | quote }},
+      "subjects": {{ .subjects | toJson | replace "\\u003e" ">" }},
+      "retention": {{ .retention | quote }},
+      "max_consumers": -1,
+      "max_msgs_per_subject": -1,
+      "max_msgs": -1,
+      "max_bytes": {{ include "samma-siem.bytes" .spec.maxBytes }},
+      "max_age": {{ include "samma-siem.nanos" .spec.maxAge }},
+      "max_msg_size": -1,
+      "storage": "file",
+      "discard": "old",
+      "num_replicas": 1,
+      "duplicate_window": {{ include "samma-siem.nanos" .spec.duplicateWindow }},
+      "sealed": false,
+      "deny_delete": false,
+      "deny_purge": false,
+      "allow_rollup_hdrs": false,
+      "allow_direct": true
+    }
+  {{- end }}
+  {{- end }}
+  {{- range $consumers }}
+  consumer.{{ .stream }}.{{ .name }}.json: |
+    {
+      "durable_name": {{ .name | quote }},
+      "filter_subject": {{ .filter | quote }},
+      "ack_policy": "explicit",
+      "ack_wait": {{ include "samma-siem.nanos" .ackWait }},
+      "max_deliver": {{ $c.maxDeliver | int }},
+      "deliver_policy": "all",
+      "replay_policy": "instant",
+      "max_ack_pending": 1000,
+      "max_waiting": 512
+    }
+  {{- end }}
+  apply.sh: |
+    {{- .Files.Get "files/apply-streams.sh" | nindent 4 }}
+{{- end }}
