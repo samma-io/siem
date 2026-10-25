@@ -1,0 +1,74 @@
+{{- if .Values.vector.enabled }}
+{{- /*
+Vector: samma.raw.<lane> (consumer vector-<lane> on SIEM_RAW) -> envelope
+VRL -> samma.logs.<lane> (SIEM_LOGS). Rendered only when a lane has raw
+records. The config is baked into the image; this selects it.
+*/ -}}
+{{- $raw := list -}}
+{{- range include "samma-siem.lanes" . | fromJsonArray }}{{ if .raw }}{{ $raw = append $raw .name }}{{ end }}{{ end -}}
+{{- if $raw }}
+{{- $v := .Values.vector }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "samma-siem.workloadName" (dict "root" . "suffix" "vector") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vector
+  annotations:
+    # The raw lanes this release expects Vector to read.
+    siem.samma.io/raw-lanes: {{ join "," $raw | quote }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "vector") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: vector
+      {{- with .Values.workloads.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" . | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vector
+          image: {{ include "samma-siem.workloadImage" (dict "name" "vector" "values" $v) }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          args: [--config, {{ $v.configPath | quote }}]
+          env:
+            - name: NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" (list "NATS_URL") "what" "vector.env") | trim }}{{ . | nindent 12 }}{{ end }}
+          ports:
+            - name: api
+              containerPort: 8686
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            periodSeconds: 10
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            # data_dir. Nothing in it needs to survive a restart: the
+            # position is the durable consumer's, on the server.
+            - name: data
+              mountPath: /var/lib/vector
+      volumes:
+        - name: data
+          emptyDir: {}
+{{- end }}
+{{- end }}

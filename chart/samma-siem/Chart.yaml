@@ -1,10 +1,10 @@
 apiVersion: v2
 name: samma-siem
-description: The Kubernetes SIEM of Samma (ingester, Vector, detection-engine, alert-destination over NATS JetStream). This version installs the foundation only - JetStream, the streams and consumers, and an optional MinIO.
+description: The Kubernetes SIEM of Samma - ingester, Vector, detection-engine and alert-destination over NATS JetStream, with the streams and consumers and an optional MinIO.
 type: application
 # version and appVersion move together.
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 kubeVersion: ">=1.25.0-0"
 home: https://samma.io
 sources:

@@ -1,4 +1,4 @@
-samma-siem {{ .Chart.Version }}: the foundation of the Kubernetes SIEM.
+samma-siem {{ .Chart.Version }}: the Kubernetes SIEM.
 
 NATS:    {{ include "samma-siem.natsUrl" . }}
 {{- if .Values.streams.enabled }}
@@ -12,4 +12,27 @@ S3:      {{ include "samma-siem.s3Endpoint" . }}, bucket {{ .Values.s3.bucket }}
 S3:      {{ .Values.s3.endpoint }}, bucket {{ .Values.s3.bucket }}
 {{- end }}
 
-Every Service is ClusterIP; the chart creates no Ingress.
+{{- $lanes := include "samma-siem.lanes" . | fromJsonArray }}
+
+Workloads (Postgres DSN from Secret {{ .Values.postgres.existingSecret | default "-" }}, key {{ .Values.postgres.dsnKey }}):
+{{- if .Values.ingester.enabled }}
+{{- range .Values.ingester.sources }}
+{{- $cfg := get ($.Values.ingester.perSource | default dict) (toString .) | default dict }}
+  ingester-{{ . }}{{ if eq (int (hasKey $cfg "replicas" | ternary $cfg.replicas $.Values.ingester.replicas)) 0 }} (replicas: 0 until it has a credential){{ end }}
+{{- end }}
+{{- end }}
+{{- $raw := list }}{{ range $lanes }}{{ if .raw }}{{ $raw = append $raw .name }}{{ end }}{{ end }}
+{{- if and .Values.vector.enabled $raw }}
+  vector ({{ join ", " $raw }})
+{{- end }}
+{{- if .Values.detectionEngine.enabled }}
+{{- range $lanes }}
+  detection-engine-{{ .name }}
+{{- end }}
+{{- end }}
+{{- if .Values.alertDestination.enabled }}
+  alert-destination -> siem_alerts
+{{- end }}
+
+The workloads wait for their consumers: until the streams Job has run they
+restart. Every Service is ClusterIP; the chart creates no Ingress.

@@ -1,17 +1,26 @@
 # samma-siem chart
 
 The Helm chart of the Kubernetes SIEM: ingester, Vector, detection-engine and
-alert-destination talking over NATS JetStream. This version installs the
-foundation only:
+alert-destination talking over NATS JetStream.
+
+```
+ingester-<source> ─► samma.raw.<lane> ─► vector ─► samma.logs.<lane> ─► detection-engine-<lane>
+   (SIEM_RAW)                              (SIEM_LOGS)
+─► samma.alerts.<lane> ─► alert-destination ─► Postgres siem_alerts
+     (SIEM_ALERTS)
+```
+
+It installs:
 
 - NATS with JetStream on a file store (the official `nats` chart, `nats.enabled`)
 - the streams `SIEM_RAW`, `SIEM_LOGS`, `SIEM_ALERTS` and `INGESTER_SLICES`, and
   their durable consumers, created by a hook Job
+- the four workloads (see "Workloads")
 - MinIO and an archive bucket (the official `minio` chart, `minio.enabled`), or
   any S3-compatible store you point it at
 - a reference to the existing TimescaleDB through a Secret (no Postgres is deployed)
 
-The workloads come in later versions. The message contract is in
+The message contract is in
 `samma-io/aws-siem`: `docs/contracts/detection-alert-v1.md` ("NATS transport")
 and `docs/contracts/nats-transport.md`.
 
@@ -27,6 +36,8 @@ The dependencies are pinned in `Chart.yaml` and `Chart.lock`. Their archives
 helm repo add nats https://nats-io.github.io/k8s/helm/charts/
 helm repo add minio https://charts.min.io/
 helm dependency build chart/samma-siem
+# The Postgres Secret (postgres.existingSecret, default siem-postgres) must
+# exist first; see "Postgres" below.
 helm upgrade --install samma-siem chart/samma-siem -n samma-siem --create-namespace
 kubectl -n samma-siem logs job/samma-siem-streams
 ```
@@ -112,6 +123,71 @@ is the DLQ of this transport.
 | `alert-destination` | `alertDestination` | 120s | above `ALERTDEST_DAEMON_MESSAGE_TIMEOUT` (60s) |
 | `ingester-<source>` | `ingester` | 20m | above the daemon's 15m message timeout |
 
+## Workloads
+
+Each workload is a Deployment with no Ingress and at most a ClusterIP Service.
+Every pod runs as uid 65532 (`workloads.runAsUser`), non-root, with a read-only
+root filesystem, all capabilities dropped, the RuntimeDefault seccomp profile, no
+service account token, requests and limits, and `kubernetes.io/arch: amd64` (the
+images are linux/amd64 only). The env, args, probes and ports are those of the
+deployment running on v2 (`samma-io/deploy` `siem/`).
+
+| Deployment | One per | Reads | Writes | Notes |
+|---|---|---|---|---|
+| `<release>-ingester-<source>` | entry of `ingester.sources` | `INGESTER_SLICES` (`ingester-<source>`) | `samma.raw.<lane>`, `ingester_checkpoint` | `daemon`, `INGESTER_TRANSPORT=nats`, `Recreate`, at most one replica |
+| `<release>-vector` | release, if a lane has raw records | `SIEM_RAW` (`vector-<lane>`) | `samma.logs.<lane>` | `--config /etc/vector/vector-k8s.yaml`, the config baked into the image |
+| `<release>-detection-engine-<lane>` | entry of `lanes` | `SIEM_LOGS` (`detection-engine-<lane>`) | `samma.alerts.<lane>` | `ENGINE_TRANSPORT=nats`, rules baked in at `/rules`, ClusterIP Service on `:9090` |
+| `<release>-alert-destination` | release | `SIEM_ALERTS` (`alert-destination`) | `siem_alerts`, `alert_ledger` | `ALERTDEST_TRANSPORT=nats`, routes from ConfigMap `<release>-alert-routes` |
+
+All of them use the chart's NATS URL: the in-release Service with
+`nats.enabled`, else `externalNats.url`. Until the streams Job has created their
+consumers on a first install, the workloads exit at start and are restarted.
+
+**Images** are `ghcr.io/samma-io/<repo>` at a commit tag, set per component
+(`<component>.tag`, or `.digest`, which wins). `latest` is refused. The defaults
+are the tags running on v2:
+
+| Component | Tag | Note |
+|---|---|---|
+| `ingester` | `89ed408` | NATS transport (ingester#5) |
+| `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane |
+| `detectionEngine` | `d5d7439` | NATS transport; knows the SaaS lanes only |
+| `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination |
+
+**Lanes that need a newer image.** The `k8s` and `scanner` lanes and their rules
+are in detection-engine `main` from `0c5b5ce` on, and `d5d7439` refuses
+`ENGINE_LOG_SOURCE=k8s`. Set `detectionEngine.tag` to an image built from there
+before adding them. The baked Vector config reads only `vector-workspace`, so a
+raw lane other than `workspace` needs a Vector image whose config reads it.
+
+**Ingester sources.** A source publishes to `samma.raw.<lane>` (`workspace` for
+`google-workspace`), so its lane must be in `lanes` with raw records; the chart
+refuses to render otherwise. Only `google-workspace` works on Kubernetes so far:
+Slack, 1Password and Cloudflare still read their token from SSM. The Workspace
+ingester ships at `replicas: 0`. To go live:
+
+1. Create the Secret named in `ingester.perSource.google-workspace.existingSecret`
+   (default `ingester-google`, key `key.json`): a service-account key that may
+   impersonate the delegated service account (`samma-io/ingester` README,
+   "Credential setup"). It is mounted at `/var/run/secrets/ingester`.
+2. Set `ingester.perSource.google-workspace.env.INGESTER_GWS_SUBJECT` and
+   `INGESTER_GCP_TARGET_SERVICE_ACCOUNT`, and `replicas: 1`. The chart refuses
+   `replicas: 1` without them, and more than one replica.
+
+**Routes.** The default table sends everything to the `postgres` destination,
+table `siem_alerts`, with `require_slack: false`. `alertDestination.routes`
+replaces it with a whole table. The NATS transport of alert-destination
+`779befa` builds only the `postgres` destination and refuses a table that names
+`slack` or `github`, so `alertDestination.slack.enabled` stays `false` until the
+image supports them. `alertDestination.existingSecret` names the Secret with the
+Slack and GitHub tokens, mounted at `/var/run/secrets/alert-destination`; tokens
+never go in values.
+
+**Extra env.** `vector.env`, `detectionEngine.env`, `alertDestination.env` and
+`ingester.perSource.<source>.env` take `NAME: value` settings from the service's
+README. A name the chart sets (the transport, NATS, Postgres, routes) is refused,
+and an empty value is left out.
+
 ## Values
 
 | Key | Default | What |
@@ -141,8 +217,27 @@ is the DLQ of this transport.
 | `minio.enabled` | `true` | Install the `minio` chart (5.4.0), standalone, one 10Gi PVC |
 | `minio.existingSecret` | empty | Secret with `rootUser` and `rootPassword` |
 | `minio.*` | | Passed to the [minio chart](https://github.com/minio/minio/tree/master/helm/minio) |
-| `postgres.existingSecret` | empty | Secret holding a DSN for the existing TimescaleDB (database `siem`, never `scan_results`) |
+| `postgres.existingSecret` | `siem-postgres` | Secret holding a DSN for the existing TimescaleDB (database `siem`, never `scan_results`); required by the ingester and alert-destination |
 | `postgres.dsnKey` | `dsn` | Key of the DSN in that Secret |
+| `workloads.runAsUser` | `65532` | uid of every workload |
+| `workloads.nodeSelector` | `kubernetes.io/arch: amd64` | Node selector of every workload |
+| `workloads.tolerations`, `.affinity`, `.podAnnotations` | empty | Scheduling and pod annotations |
+| `workloads.imagePullSecrets` | `[]` | Pull Secrets, by name, for private ghcr.io packages |
+| `<component>.enabled` | `true` | `ingester`, `vector`, `detectionEngine`, `alertDestination` |
+| `<component>.image`, `.tag`, `.digest`, `.pullPolicy` | see "Workloads" | A digest wins over the tag; `latest` is refused |
+| `<component>.resources` | as on v2 | Requests and limits |
+| `vector.replicas`, `detectionEngine.replicas`, `alertDestination.replicas` | `1` | Replicas |
+| `vector.configPath` | `/etc/vector/vector-k8s.yaml` | Config file in the image |
+| `detectionEngine.workers` | `2` | `ENGINE_WORKERS` |
+| `alertDestination.messageTimeout` | `60s` | `ALERTDEST_DAEMON_MESSAGE_TIMEOUT`; must be below `consumers.ackWait.alertDestination` |
+| `alertDestination.routes` | empty | A whole routing table; empty is the postgres-only table |
+| `alertDestination.slack.enabled` | `false` | `require_slack`; needs `routes` and an image with Slack in its NATS transport |
+| `alertDestination.existingSecret` | empty | Secret with the Slack and GitHub tokens |
+| `ingester.replicas`, `.scheduleInterval`, `.reconcileInterval` | `0`, `10m`, `1h` | Defaults for every source |
+| `ingester.perSource.<source>.replicas` | `0` for `google-workspace` | 0 or 1 |
+| `ingester.perSource.<source>.existingSecret`, `.secretOptional` | `ingester-google`, `true` | Credential Secret of the source |
+| `ingester.perSource.<source>.env` | Workspace subject and service account, empty | Extra `INGESTER_*` settings |
+| `<component>.env` | `{}` | Extra env, see "Workloads" |
 
 Notes:
 
@@ -161,18 +256,21 @@ Notes:
   from the Secret, so the access key and secret must be URL-safe. MinIO's
   generated ones are alphanumeric. The Job runs only with `minio.enabled`. With
   another S3, create the bucket there.
-- **Postgres.** The values are a contract for the workloads to come. The ingester
-  will keep `ingester_checkpoint` there, and alert-destination `alert_ledger` and
-  `siem_alerts`. Create the role, database and Secret as in `samma-io/deploy`
-  `siem/README.md` ("First install").
+- **Postgres.** The ingester keeps `ingester_checkpoint` there, and
+  alert-destination `alert_ledger` and `siem_alerts`; both create their tables at
+  start. The DSN is mounted from `postgres.existingSecret` as a file
+  (`*_POSTGRES_DSN_FILE`), never put in env. The chart creates neither the
+  Secret nor the database: create the role, database and Secret as in
+  `samma-io/deploy` `siem/README.md` ("First install").
 
 ## Checking a change
 
 ```bash
 helm dependency build   # after the two `helm repo add` above chart/samma-siem
 helm lint --strict chart/samma-siem
+helm lint --strict chart/samma-siem -f chart/samma-siem/ci/all-lanes-values.yaml
 helm template ci chart/samma-siem --namespace samma
-hack/check-chart.sh            # the render has the streams and consumers
+hack/check-chart.sh            # streams, consumers and workloads, default and all lanes
 ```
 
 CI (`.github/workflows/chart.yml`) runs the same steps with Helm 3 and Helm 4.

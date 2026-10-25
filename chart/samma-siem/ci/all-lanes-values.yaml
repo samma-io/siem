@@ -1,0 +1,7 @@
+# Every lane of the contract that runs on Kubernetes: the Workspace SaaS
+# lane plus the NATS-only k8s and scanner lanes, which have no raw records.
+# Used by CI (helm lint, helm template, hack/check-chart.sh).
+lanes:
+  - workspace
+  - {name: k8s, raw: false}
+  - {name: scanner, raw: false}
