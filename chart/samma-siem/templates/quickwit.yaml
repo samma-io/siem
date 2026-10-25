@@ -1,0 +1,180 @@
+{{- if .Values.quickwit.enabled }}
+{{- /*
+Quickwit in QW_MODE=k8s: one node running every service, metastore in
+Postgres (QW_METASTORE_URI from a Secret), index data on S3. The image's
+auto-bootstrap creates the k8s indexes (config/indexes-k8s) once
+/health/readyz answers. ClusterIP Service only: Quickwit has no
+authentication.
+*/ -}}
+{{- $v := .Values.quickwit -}}
+{{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "quickwit") -}}
+{{- if not (or $v.tag $v.digest) -}}
+{{- fail "quickwit.tag is required with quickwit.enabled: the image is built and pushed by hand (aws-siem hack/build-images.sh, chart README \"Images built by hand\") from samma-io/quickwit main at 10d8377 or later (QW_MODE=k8s), so there is no default" -}}
+{{- end -}}
+{{- $image := include "samma-siem.workloadImage" (dict "name" "quickwit" "values" $v) -}}
+{{- $metastore := required "quickwit.metastore.existingSecret (a Secret with a postgres:// QW_METASTORE_URI) is required with quickwit.enabled" $v.metastore.existingSecret -}}
+{{- if gt (int $v.replicas) 1 -}}
+{{- fail "quickwit.replicas: at most 1, the node has no peers and a second replica would be a separate cluster" -}}
+{{- end -}}
+{{- $root := $v.indexRootUri | default (printf "s3://%s/quickwit/indexes" (required "s3.bucket is required" .Values.s3.bucket)) -}}
+{{- if not (hasPrefix "s3://" $root) }}{{ fail (printf "quickwit.indexRootUri %q: an s3:// URI" $root) }}{{ end -}}
+{{- $creds := include "samma-siem.s3Credentials" . | fromJson -}}
+{{- $reserved := list "QW_MODE" "QW_METASTORE_URI" "QW_DEFAULT_INDEX_ROOT_URI" "QW_S3_ENDPOINT" "QW_S3_FORCE_PATH_STYLE_ACCESS" "QW_DATA_DIR" "QW_REST_LISTEN_PORT" "QW_CLUSTER_ID" "QW_PEER_SEEDS" "AWS_REGION" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "TMPDIR" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quickwit
+spec:
+  replicas: {{ $v.replicas }}
+  # One node at a time: the old one stops before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "quickwit") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: quickwit
+      {{- with .Values.workloads.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" . | nindent 6 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: quickwit
+          image: {{ $image }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          args: [run]
+          env:
+            - name: QW_MODE
+              value: k8s
+            - name: QW_METASTORE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $metastore }}
+                  key: {{ $v.metastore.uriKey }}
+            - name: QW_DEFAULT_INDEX_ROOT_URI
+              value: {{ $root | quote }}
+            - name: QW_S3_ENDPOINT
+              value: {{ include "samma-siem.s3Endpoint" . | quote }}
+            - name: QW_S3_FORCE_PATH_STYLE_ACCESS
+              value: {{ .Values.s3.forcePathStyle | toString | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $creds.secret }}
+                  key: {{ $creds.idKey }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $creds.secret }}
+                  key: {{ $creds.secretKey }}
+            - name: QW_DATA_DIR
+              value: /quickwit/qwdata
+            - name: QW_REST_LISTEN_PORT
+              value: "7280"
+            - name: QW_CLUSTER_ID
+              value: {{ $name | quote }}
+            # The bootstrap writes its request bodies here.
+            - name: TMPDIR
+              value: /tmp
+            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" $reserved "what" "quickwit.env") | trim }}{{ . | nindent 12 }}{{ end }}
+          ports:
+            - name: rest
+              containerPort: 7280
+          # readyz is 200 only once the metastore is reachable.
+          startupProbe:
+            httpGet:
+              path: /health/livez
+              port: rest
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health/livez
+              port: rest
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/readyz
+              port: rest
+            periodSeconds: 10
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            # Splits are staged here before upload, with the ingest WAL. The
+            # indexes themselves are on S3.
+            - name: data
+              mountPath: /quickwit/qwdata
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: {{ $v.dataSizeLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# REST API and UI. Inside the cluster only: kubectl port-forward (README).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quickwit
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "samma-siem.selectorLabels" (dict "root" . "component" "quickwit") | nindent 4 }}
+  ports:
+    - name: rest
+      port: 7280
+      targetPort: rest
+{{- if $v.networkPolicy.enabled }}
+---
+# Quickwit has no authentication: search, ingest and index deletion are open
+# to whoever reaches 7280. Only this release's Grafana (search) and Vector
+# (ingest) may.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quickwit
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "quickwit") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values: [{{ .Release.Name | quote }}]
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [grafana, vector]
+      ports:
+        - port: rest
+          protocol: TCP
+{{- end }}
+{{- end }}

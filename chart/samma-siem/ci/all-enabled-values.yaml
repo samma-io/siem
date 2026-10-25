@@ -1,0 +1,20 @@
+# Every workload on: the all-lanes set plus siem-storage on both backends,
+# Quickwit and Grafana. The tags and Secrets are placeholders for the render
+# only; nothing in CI pulls them. Used by CI (helm lint, helm template,
+# hack/check-chart.sh).
+lanes:
+  - workspace
+  - {name: k8s, raw: false}
+  - {name: scanner, raw: false}
+storage:
+  enabled: true
+  backends: [postgres, s3]
+quickwit:
+  enabled: true
+  tag: ci-placeholder
+  metastore:
+    existingSecret: siem-quickwit-metastore
+grafana:
+  enabled: true
+  tag: ci-placeholder
+  existingSecret: siem-grafana

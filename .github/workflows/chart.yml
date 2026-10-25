@@ -35,11 +35,13 @@ jobs:
         run: |
           helm lint --strict chart/samma-siem
           helm lint --strict chart/samma-siem -f chart/samma-siem/ci/all-lanes-values.yaml
+          helm lint --strict chart/samma-siem -f chart/samma-siem/ci/all-enabled-values.yaml
 
       - name: helm template
         run: |
           helm template ci chart/samma-siem --namespace samma > /dev/null
           helm template ci chart/samma-siem --namespace samma -f chart/samma-siem/ci/all-lanes-values.yaml > /dev/null
+          helm template ci chart/samma-siem --namespace samma -f chart/samma-siem/ci/all-enabled-values.yaml > /dev/null
 
-      - name: streams, consumers and workloads in the render
+      - name: streams, consumers, workloads and refusals in the render
         run: hack/check-chart.sh chart/samma-siem
