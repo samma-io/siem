@@ -36,3 +36,7 @@ Thumbs.db
 tmp/
 *.tmp
 *.log
+
+# Helm: dependencies are pinned in Chart.lock and fetched with
+# `helm dependency build chart/samma-siem`
+chart/*/charts/

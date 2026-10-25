@@ -1,0 +1,233 @@
+# samma-siem: the foundation of the Kubernetes SIEM. The message contract is
+# samma-io/aws-siem docs/contracts/detection-alert-v1.md, "NATS transport",
+# and docs/contracts/nats-transport.md. Workloads (ingester, Vector,
+# detection-engine, alert-destination) come in later chart versions.
+#
+# Nothing here is exposed outside the cluster: every Service is ClusterIP and
+# the chart renders no Ingress.
+
+# Lanes captured by the streams (README, "Lanes"). Only deployed lanes: a
+# lane listed here gets its subjects in SIEM_RAW and SIEM_LOGS and its
+# durable consumers. Do not use a wildcard. The legacy pipeline publishes
+# samma.logs.k8s and samma.logs.k8s.audit (~11 MiB/min) on core NATS, and a
+# stream on samma.logs.> would fill its byte cap within the hour.
+#
+# An entry is a lane name, or {name, raw} where raw: false leaves the lane
+# out of SIEM_RAW (no samma.raw.<lane>, no vector-<lane> consumer). The k8s
+# and scanner lanes of the contract have no raw records.
+#   - workspace
+#   - {name: k8s, raw: false}
+lanes:
+  - workspace
+
+# Ingester sources with a worker consumer ingester-<source> on
+# samma.ingester.slices.<source> (stream INGESTER_SLICES).
+ingester:
+  sources:
+    - google-workspace
+
+# NATS: the official chart (nats-io/k8s) with JetStream on a file store.
+# false installs no NATS; set externalNats.url to use one you run already.
+nats:
+  enabled: true
+  # The subchart's own images, pinned by digest (the digest wins over the
+  # tag, which stays as the readable name).
+  container:
+    image:
+      repository: nats
+      tag: 2.15.0-alpine
+      digest: "sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4"
+  reloader:
+    image:
+      repository: natsio/nats-server-config-reloader
+      tag: 0.23.0
+      digest: "sha256:64cb6c858e794906d3167378e02b7e0feb83c4e14c07b371eb8d921ef8c4a60b"
+  config:
+    jetstream:
+      enabled: true
+      fileStore:
+        enabled: true
+        pvc:
+          enabled: true
+          # The stream byte caps below must fit in this, with headroom. Raise
+          # both together, never the caps alone.
+          size: 1Gi
+          storageClassName:
+  # The upstream chart's always-on nats-box Deployment. The streams Job
+  # brings its own nats-box; turn this on for a shell to poke at streams.
+  natsBox:
+    enabled: false
+
+# Used only with nats.enabled: false. With nats.enabled the URL is the
+# subchart's Service, nats://<release>-nats.<namespace>.svc:4222.
+externalNats:
+  url: ""   # e.g. nats://nats.samma.svc:4222
+
+# Streams and consumers, created by a post-install/post-upgrade hook Job
+# that runs `nats stream add|edit --config` and `nats consumer add|edit
+# --config` from the ConfigMap <release>-streams. Idempotent: what is missing
+# is created, what exists is edited to match.
+#
+# Stream names and subjects are fixed by the contract. Ages are a whole
+# number with s, m, h or d; sizes a whole number with B, KiB, MiB, GiB or
+# TiB. The defaults are the numbers running on v2 (samma-io/deploy siem/).
+# The sum of the maxBytes (400 + 200 + 100 + 10 MiB = 710 MiB) must fit the
+# JetStream PVC (nats.config.jetstream.fileStore.pvc.size, 1Gi).
+streams:
+  enabled: true
+  # SIEM_RAW: samma.raw.<lane>, raw vendor records from the ingester. The 2h
+  # duplicate window absorbs a reconcile pass re-reading the last hour.
+  raw:
+    maxAge: 24h
+    maxBytes: 100MiB
+    duplicateWindow: 2h
+  # SIEM_LOGS: samma.logs.<lane>, filtered records from Vector.
+  logs:
+    maxAge: 7d
+    maxBytes: 400MiB
+    duplicateWindow: 2m
+  # SIEM_ALERTS: samma.alerts.>, detection.alert.v1 documents. A republish
+  # of the same alert id inside the window is dropped.
+  alerts:
+    maxAge: 30d
+    maxBytes: 200MiB
+    duplicateWindow: 2m
+  # INGESTER_SLICES: samma.ingester.slices.>, a work queue (a message is
+  # gone once acked). Retention cannot be changed after creation.
+  ingesterSlices:
+    maxAge: 24h
+    maxBytes: 10MiB
+    duplicateWindow: 2h
+
+# Durable pull consumers, explicit ack. Exhausting maxDeliver is the DLQ of
+# this transport: the message stays in the stream until its age or byte
+# limit and JetStream emits a max-deliveries advisory.
+consumers:
+  maxDeliver: 5
+  ackWait:
+    # vector-<lane> on SIEM_RAW. Vector acks once the filtered record is
+    # stored in SIEM_LOGS.
+    vector: 60s
+    # detection-engine-<lane> on SIEM_LOGS. Must equal the engine's
+    # ENGINE_VISIBILITY_TIMEOUT (300s default).
+    detectionEngine: 300s
+    # alert-destination on SIEM_ALERTS. Must exceed
+    # ALERTDEST_DAEMON_MESSAGE_TIMEOUT (60s default).
+    alertDestination: 120s
+    # ingester-<source> on INGESTER_SLICES. Must exceed the ingester
+    # daemon's 15-minute message timeout.
+    ingester: 20m
+
+# The image of the streams Job. Takes image, tag and digest: a digest
+# renders image@digest and wins over the tag.
+natsBox:
+  image: natsio/nats-box
+  tag: "0.18.1"
+  digest: "sha256:abb33f930d25425dce3472039a0ffac7427344f7c0b7ef9849b9fe45bb8895fe"
+  pullPolicy: IfNotPresent
+  # nats-box has no user of its own; the Job runs as this unprivileged uid
+  # with a read-only root filesystem and HOME on an emptyDir.
+  runAsUser: 65532
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+# S3-compatible object store for the archive (nats-transport.md, "Object
+# archive"): s3://<bucket>/<lane>/date=YYYY-MM-DD/<name>.log.gz. Nothing
+# writes to it yet. With minio.enabled the defaults point at the bundled
+# MinIO; set minio.enabled: false and fill these in for any other S3.
+s3:
+  # Empty with minio.enabled: http://<release>-minio.<namespace>.svc:9000.
+  endpoint: ""
+  bucket: samma-siem-archive
+  region: us-east-1
+  # A Secret with the access key id and secret access key under the keys
+  # below. Empty with minio.enabled: the MinIO root Secret (keys rootUser
+  # and rootPassword), which is minio.existingSecret or <release>-minio.
+  existingSecret: ""
+  accessKeyIdKey: accessKeyId
+  secretAccessKeyKey: secretAccessKey
+
+# The bucket-create hook Job (mc mb --ignore-existing), rendered only with
+# minio.enabled. The image has no shell; mc reads the endpoint and
+# credentials from MC_HOST_s3, so the access key and secret must be
+# URL-safe (MinIO's generated ones are alphanumeric).
+minioClient:
+  image: cgr.dev/chainguard/minio-client
+  tag: latest
+  digest: "sha256:59f1924e417b6fcfdc0aca321e3bdebe8a56fd0efa7da80037d5eb65a203d687"
+  pullPolicy: IfNotPresent
+  runAsUser: 65532
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+# MinIO: the official chart (charts.min.io), standalone with one PVC. MinIO
+# no longer publishes images on quay.io or Docker Hub, so the image is
+# Chainguard's build, pinned by digest. It keeps the paths the chart's
+# command expects (/bin/sh, /usr/bin/docker-entrypoint.sh).
+minio:
+  enabled: true
+  image:
+    repository: cgr.dev/chainguard/minio
+    tag: "latest@sha256:268d68a2a3b6fc65f905a61f84d7eab6345ce6bff14f551e2b028ec31e6a1341"
+    pullPolicy: IfNotPresent
+  # Only used by the upstream post-install jobs, which this chart turns off
+  # (users, policies and buckets are empty). The upstream default no longer
+  # pulls.
+  mcImage:
+    repository: cgr.dev/chainguard/minio-client
+    tag: "latest@sha256:59f1924e417b6fcfdc0aca321e3bdebe8a56fd0efa7da80037d5eb65a203d687"
+  mode: standalone
+  replicas: 1
+  # Root credentials. Empty: kept from the Secret already in the cluster,
+  # else generated at install. `helm template` has no cluster to read from
+  # and generates new ones on every render; use existingSecret (keys
+  # rootUser, rootPassword) when a GitOps tool renders the chart.
+  rootUser: ""
+  rootPassword: ""
+  existingSecret: ""
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+  # The upstream default creates a consoleAdmin user console/console123.
+  users: []
+  policies: []
+  svcaccts: []
+  buckets: []
+  service:
+    type: ClusterIP
+  consoleService:
+    type: ClusterIP
+  ingress:
+    enabled: false
+  consoleIngress:
+    enabled: false
+
+# The existing TimescaleDB, through a Secret with a libpq DSN, e.g. the
+# siem-postgres Secret of samma-io/deploy siem/ (database and role "siem",
+# never the scan_results database). The chart deploys no Postgres and
+# nothing reads this yet; the ingester (ingester_checkpoint) and
+# alert-destination (alert_ledger, siem_alerts) will.
+postgres:
+  existingSecret: ""
+  dsnKey: dsn

@@ -1,0 +1,15 @@
+samma-siem {{ .Chart.Version }}: the foundation of the Kubernetes SIEM.
+
+NATS:    {{ include "samma-siem.natsUrl" . }}
+{{- if .Values.streams.enabled }}
+Streams: Job {{ include "samma-siem.fullname" . }}-streams applies the configs in
+         ConfigMap {{ include "samma-siem.fullname" . }}-streams after every install and upgrade.
+         kubectl -n {{ .Release.Namespace }} logs job/{{ include "samma-siem.fullname" . }}-streams
+{{- end }}
+{{- if .Values.minio.enabled }}
+S3:      {{ include "samma-siem.s3Endpoint" . }}, bucket {{ .Values.s3.bucket }} (Job {{ include "samma-siem.fullname" . }}-bucket)
+{{- else if .Values.s3.endpoint }}
+S3:      {{ .Values.s3.endpoint }}, bucket {{ .Values.s3.bucket }}
+{{- end }}
+
+Every Service is ClusterIP; the chart creates no Ingress.

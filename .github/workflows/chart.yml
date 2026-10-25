@@ -1,0 +1,41 @@
+name: Chart
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    name: chart (helm ${{ matrix.helm }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        helm: [v3.22.1, v4.3.1]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ matrix.helm }}
+
+      # charts/*.tgz is not committed; Chart.lock pins the exact versions.
+      - name: helm dependency build
+        run: |
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+          helm repo add minio https://charts.min.io/
+          helm dependency build chart/samma-siem
+
+      - name: helm lint
+        run: helm lint --strict chart/samma-siem
+
+      - name: helm template
+        run: helm template ci chart/samma-siem --namespace samma > /dev/null
+
+      - name: streams and consumers in the render
+        run: hack/check-chart.sh chart/samma-siem

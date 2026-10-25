@@ -112,6 +112,12 @@ go build -o siem .
 docker build -t sammascanner/siem:latest .
 ```
 
+## Helm chart
+
+`chart/samma-siem` is the chart of the Kubernetes SIEM (the NATS transport of
+`samma-io/aws-siem`). It installs NATS JetStream, the streams and consumers, and
+an optional MinIO; see [`chart/samma-siem/README.md`](chart/samma-siem/README.md).
+
 ## License
 
 Copyright Samma IO. All rights reserved.
