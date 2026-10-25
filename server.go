@@ -1,15 +1,18 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
 type Alert struct {
-	Rule  AlertRule              `json:"rule"`
-	Event map[string]interface{} `json:"event"`
+	Rule   AlertRule              `json:"rule"`
+	Event  map[string]interface{} `json:"event"`
+	Source string                 `json:"source"`
 }
 
 type AlertRule struct {
@@ -19,7 +22,7 @@ type AlertRule struct {
 	Compliance  Compliance `json:"compliance"`
 }
 
-func processEvent(event map[string]interface{}, rules []CompiledRule, nc *NATSClient) int {
+func processEvent(event map[string]interface{}, rules []CompiledRule, nc *NATSClient, source string) int {
 	matched := 0
 	for _, rule := range rules {
 		if rule.Matcher(event) {
@@ -31,7 +34,8 @@ func processEvent(event map[string]interface{}, rules []CompiledRule, nc *NATSCl
 					Severity:    rule.Severity,
 					Compliance:  rule.Compliance,
 				},
-				Event: event,
+				Event:  event,
+				Source: source,
 			}
 			data, err := json.Marshal(alert)
 			if err != nil {
@@ -48,10 +52,31 @@ func processEvent(event map[string]interface{}, rules []CompiledRule, nc *NATSCl
 	return matched
 }
 
+func authenticatedSender(r *http.Request, tokens map[string]string) (string, bool) {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(auth, prefix) {
+		return "", false
+	}
+	token := auth[len(prefix):]
+	for tok, sender := range tokens {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(tok)) == 1 {
+			return sender, true
+		}
+	}
+	return "", false
+}
+
 func StartServer(cfg Config, rules []CompiledRule, nc *NATSClient) {
 	http.HandleFunc("/ingest", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		sender, ok := authenticatedSender(r, cfg.IngestTokens)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -62,7 +87,7 @@ func StartServer(cfg Config, rules []CompiledRule, nc *NATSClient) {
 			return
 		}
 
-		matched := processEvent(event, rules, nc)
+		matched := processEvent(event, rules, nc, sender)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{

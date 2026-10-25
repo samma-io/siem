@@ -11,11 +11,15 @@ type NATSClient struct {
 	conn *nats.Conn
 }
 
-func NewNATSClient(url string) (*NATSClient, error) {
-	nc, err := nats.Connect(url,
+func NewNATSClient(url, user, password string) (*NATSClient, error) {
+	opts := []nats.Option{
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
-	)
+	}
+	if user != "" {
+		opts = append(opts, nats.UserInfo(user, password))
+	}
+	nc, err := nats.Connect(url, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS at %s: %w", url, err)
 	}
@@ -27,10 +31,10 @@ func (c *NATSClient) Publish(subject string, data []byte) error {
 	return c.conn.Publish(subject, data)
 }
 
-func (c *NATSClient) Subscribe(subjects []string, handler func([]byte)) error {
+func (c *NATSClient) Subscribe(subjects []string, handler func(subject string, data []byte)) error {
 	for _, subject := range subjects {
 		_, err := c.conn.Subscribe(subject, func(msg *nats.Msg) {
-			handler(msg.Data)
+			handler(msg.Subject, msg.Data)
 		})
 		if err != nil {
 			return fmt.Errorf("subscribing to %s: %w", subject, err)

@@ -13,6 +13,7 @@ services:
       - SIEM_NATS_URL=nats://nats:4222
       - SIEM_NATS_SUBSCRIBE=samma.logs.>
       - SIEM_RULES_DIR=/app/rules
+      - SIEM_INGEST_TOKENS=${SIEM_INGEST_TOKENS:-dev=devtoken}
 
   nats:
     image: nats:latest
