@@ -1,5 +1,13 @@
 # Simple Kubernetes Deployment
 
+> [!WARNING]
+> **Deprecated.** This example deploys the legacy custom YAML rule engine, which
+> is deprecated. For a new deployment use
+> [`chart/samma-siem`](../../chart/samma-siem/README.md) with
+> [samma-io/detection-engine](https://github.com/samma-io/detection-engine)
+> (Sigma rules, lanes `k8s` and `scanner`). This example is kept only for
+> existing deployments until they are cut over, and will be removed with the engine.
+
 This example deploys the Samma SIEM into a Kubernetes cluster with the following pipeline:
 
 ```
