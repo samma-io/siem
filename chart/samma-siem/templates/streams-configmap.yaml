@@ -26,6 +26,9 @@ siem/00-streams-job.yaml creates, so this chart and that Job agree.
 {{- if .raw }}{{ $consumers = append $consumers (dict "stream" "SIEM_RAW" "name" (printf "vector-%s" .name) "filter" (printf "samma.raw.%s" .name) "ackWait" $c.ackWait.vector) }}{{ end -}}
 {{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" (printf "detection-engine-%s" .name) "filter" (printf "samma.logs.%s" .name) "ackWait" $c.ackWait.detectionEngine) -}}
 {{- end -}}
+{{- if include "samma-siem.vectorQuickwitAlerts" . -}}
+{{- $consumers = append $consumers (dict "stream" "SIEM_ALERTS" "name" "vector-alerts-quickwit" "filter" "samma.alerts.>" "ackWait" $c.ackWait.vectorAlertsQuickwit) -}}
+{{- end -}}
 {{- range .Values.ingester.sources -}}
 {{- if not (regexMatch "^[a-z0-9]+(-[a-z0-9]+)*$" (toString .)) }}{{ fail (printf "ingester source %q: a lowercase name like google-workspace" (toString .)) }}{{ end -}}
 {{- $consumers = append $consumers (dict "stream" "INGESTER_SLICES" "name" (printf "ingester-%s" .) "filter" (printf "samma.ingester.slices.%s" .) "ackWait" $c.ackWait.ingester) -}}

@@ -142,6 +142,7 @@ is the DLQ of this transport.
 | `storage-logs` | `storage` | 60s | a batch of `storage.batchSize` committed to `siem_events` well within it |
 | `storage-s3-logs` | `storageS3Logs` | 6m | above `storage.s3.flushInterval` (5m): a message is acked only once its object is written. The chart refuses an AckWait at or below the interval |
 | `storage-s3-alerts` | `storageS3Alerts` | 2m | one object per alert; the service's own value |
+| `vector-alerts-quickwit` | `vectorAlertsQuickwit` | 120s | only with `vector.quickwitAlerts`; above the alerts sink's 5s batch plus 30s request retried for 30s |
 
 The storage consumers exist only with `storage.enabled`, and only for the
 configured `storage.backends`: `storage-logs` (on `SIEM_LOGS`) for `postgres`,
@@ -150,6 +151,10 @@ for `s3`. The two on `SIEM_LOGS` filter on every lane's `samma.logs.<lane>`
 (`filter_subjects`). The S3 ones hold messages unacked for up to a flush
 interval, so they have `max_ack_pending` 10000, as the service creates them;
 every other consumer has 1000.
+
+`vector-alerts-quickwit` (on `SIEM_ALERTS`, filter `samma.alerts.>`) exists only
+with `quickwit.enabled`, `vector.quickwitAlerts` and a rendered Vector: Vector's
+alerts overlay reads it and does not start without it.
 
 ## Workloads
 
@@ -164,9 +169,9 @@ deployment running on v2 (`samma-io/deploy` `siem/`).
 | Deployment | One per | Reads | Writes | Notes |
 |---|---|---|---|---|
 | `<release>-ingester-<source>` | entry of `ingester.sources` | `INGESTER_SLICES` (`ingester-<source>`) | `samma.raw.<lane>`, `ingester_checkpoint` | `daemon`, `INGESTER_TRANSPORT=nats`, `Recreate`, at most one replica |
-| `<release>-vector` | release, if a lane has raw records | `SIEM_RAW` (`vector-<lane>`) | `samma.logs.<lane>` | `--config /etc/vector/vector-k8s.yaml`, the config baked into the image |
+| `<release>-vector` | release, if a lane has raw records | `SIEM_RAW` (`vector-<lane>`); with `vector.quickwitAlerts` also `SIEM_ALERTS` (`vector-alerts-quickwit`) | `samma.logs.<lane>`; with `quickwit.enabled` also Quickwit | `--config /etc/vector/vector-k8s.yaml`, the config baked into the image, plus the Quickwit overlays (see "Quickwit") |
 | `<release>-detection-engine-<lane>` | entry of `lanes` | `SIEM_LOGS` (`detection-engine-<lane>`) | `samma.alerts.<lane>` | `ENGINE_TRANSPORT=nats`, rules baked in at `/rules`, ClusterIP Service on `:9090` |
-| `<release>-alert-destination` | release | `SIEM_ALERTS` (`alert-destination`) | `siem_alerts`, `alert_ledger` | `ALERTDEST_TRANSPORT=nats`, routes from ConfigMap `<release>-alert-routes` |
+| `<release>-alert-destination` | release | `SIEM_ALERTS` (`alert-destination`) | `siem_alerts`, `alert_ledger`; Slack and GitHub when routed | `ALERTDEST_TRANSPORT=nats`, routes from ConfigMap `<release>-alert-routes`, tokens from `alertDestination.existingSecret` |
 | `<release>-siem-storage` | release, `storage.enabled` | `SIEM_LOGS` (`storage-logs`, `storage-s3-logs`), `SIEM_ALERTS` (`storage-s3-alerts`) | `siem_events`, the S3 archive | `STORAGE_BACKENDS=postgres,s3`, binds to the Job's consumers |
 | `<release>-quickwit` | release, `quickwit.enabled` | ingest API | index on S3, metastore in Postgres | `QW_MODE=k8s`, `Recreate`, one replica, ClusterIP Service on `:7280` |
 | `<release>-grafana` | release, `grafana.enabled` | Quickwit, `siem_alerts` | nothing | k8s provisioning, runs as uid 472, ClusterIP Service on `:3000` |
@@ -182,9 +187,9 @@ are the tags running on v2:
 | Component | Tag | Note |
 |---|---|---|
 | `ingester` | `89ed408` | NATS transport (ingester#5) |
-| `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane |
+| `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane; no Quickwit overlays (needs `34806c1` or later with `quickwit.enabled`) |
 | `detectionEngine` | `d5d7439` | NATS transport; knows the SaaS lanes only |
-| `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination |
+| `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination; no Slack or GitHub (needs `e9987eb` or later to route to them) |
 | `storage` | `sha-6c3f143` | siem-storage `main` with the Postgres and S3 backends, built by its CI |
 | `quickwit` | none, required | pushed by hand, see "Images built by hand" |
 | `grafana` | none, required | pushed by hand, see "Images built by hand" |
@@ -194,6 +199,10 @@ are in detection-engine `main` from `0c5b5ce` on, and `d5d7439` refuses
 `ENGINE_LOG_SOURCE=k8s`. Set `detectionEngine.tag` to an image built from there
 before adding them. The baked Vector config reads only `vector-workspace`, so a
 raw lane other than `workspace` needs a Vector image whose config reads it.
+With `quickwit.enabled`, Vector gets the Quickwit overlays, which are in
+samma-io/vector `main` from `34806c1` on; `f2f2dea` does not have the files and
+would not start. Routing alerts to Slack or GitHub needs alert-destination
+`main` from `e9987eb` on; `779befa` refuses such a table.
 
 **Ingester sources.** A source publishes to `samma.raw.<lane>` (`workspace` for
 `google-workspace`), so its lane must be in `lanes` with raw records; the chart
@@ -211,17 +220,35 @@ ingester ships at `replicas: 0`. To go live:
 
 **Routes.** The default table sends everything to the `postgres` destination,
 table `siem_alerts`, with `require_slack: false`. `alertDestination.routes`
-replaces it with a whole table. The NATS transport of alert-destination
-`779befa` builds only the `postgres` destination and refuses a table that names
-`slack` or `github`, so `alertDestination.slack.enabled` stays `false` until the
-image supports them. `alertDestination.existingSecret` names the Secret with the
-Slack and GitHub tokens, mounted at `/var/run/secrets/alert-destination`; tokens
-never go in values.
+replaces it with a whole table. Slack and GitHub need an alert-destination
+image from `e9987eb` on (`779befa` builds only `postgres` and refuses a table
+that names `slack` or `github`) and a Secret, `alertDestination.existingSecret`,
+with the keys:
+
+| Key | Holds | File (`ALERTDEST_*_TOKEN_FILE`) |
+|---|---|---|
+| `slack-token` | the Slack bot token | `/var/run/secrets/alert-destination/slack-token` |
+| `github-token` | the GitHub fine-grained PAT | `/var/run/secrets/alert-destination/github-token` |
+
+```sh
+kubectl -n <namespace> create secret generic siem-alert-destination \
+  --from-file=slack-token=./slack-token --from-file=github-token=./github-token
+```
+
+The Secret is mounted whole (not by `subPath`), so a rotated token reaches the
+file and is re-read after an authentication failure without a restart. With
+`existingSecret` set the chart sets both `ALERTDEST_SLACK_TOKEN_FILE` and
+`ALERTDEST_GITHUB_TOKEN_FILE`, whatever the table routes to: alert-destination
+builds a destination only when a route names it and ignores the other file, so
+a key no route uses may be left out of the Secret, while a routed one that is
+missing stops the pod at start. The chart refuses `alertDestination.slack.enabled`,
+or a `routes` table with a `deliveries` entry `to: slack` or `to: github`,
+without `existingSecret`. Tokens never go in values.
 
 **Extra env.** `vector.env`, `detectionEngine.env`, `alertDestination.env` and
 `storage.env`, `quickwit.env`, `grafana.env` and
 `ingester.perSource.<source>.env` take `NAME: value` settings from the service's
-README. A name the chart sets (the transport, NATS, Postgres, routes) is refused,
+README. A name the chart sets (the transport, NATS, Postgres, routes, token files, `QUICKWIT_URL`) is refused,
 and an empty value is left out.
 
 ## Storage, search and dashboards
@@ -265,6 +292,17 @@ quickwit:
   NetworkPolicy (`quickwit.networkPolicy.enabled`, on) admits port 7280 only
   from this release's Grafana and Vector pods. It needs a CNI that enforces
   NetworkPolicy.
+- **Vector feeds it.** With `quickwit.enabled` Vector runs with
+  `--config /etc/vector/vector-k8s-quickwit.yaml` after its base config and
+  `QUICKWIT_URL=http://<release>-samma-siem-quickwit.<namespace>.svc:7280` (no
+  `/api/v1`): the filtered Workspace records go to the `logs-saas` index,
+  best-effort (retried, buffered, then dropped; NATS is never held up).
+  `vector.quickwitAlerts: true` adds `vector-k8s-quickwit-alerts.yaml`: alerts
+  from consumer `vector-alerts-quickwit` on `SIEM_ALERTS`, which the streams Job
+  creates, into the `alerts` index; that path blocks while Quickwit is down and
+  the alerts wait in the stream. Both need a Vector image from `34806c1` on
+  (samma-io/vector README, "Quickwit (optional)"). `vector.quickwitAlerts`
+  without `quickwit.enabled` is refused.
 
 ### Grafana
 
@@ -393,11 +431,12 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | `<component>.resources` | as on v2 | Requests and limits |
 | `vector.replicas`, `detectionEngine.replicas`, `alertDestination.replicas` | `1` | Replicas |
 | `vector.configPath` | `/etc/vector/vector-k8s.yaml` | Config file in the image |
+| `vector.quickwitAlerts` | `false` | With `quickwit.enabled`: alerts into Quickwit, consumer `vector-alerts-quickwit` |
 | `detectionEngine.workers` | `2` | `ENGINE_WORKERS` |
 | `alertDestination.messageTimeout` | `60s` | `ALERTDEST_DAEMON_MESSAGE_TIMEOUT`; must be below `consumers.ackWait.alertDestination` |
 | `alertDestination.routes` | empty | A whole routing table; empty is the postgres-only table |
-| `alertDestination.slack.enabled` | `false` | `require_slack`; needs `routes` and an image with Slack in its NATS transport |
-| `alertDestination.existingSecret` | empty | Secret with the Slack and GitHub tokens |
+| `alertDestination.slack.enabled` | `false` | `require_slack`; needs `routes`, `existingSecret` and an image from `e9987eb` on |
+| `alertDestination.existingSecret` | empty | Secret with keys `slack-token`, `github-token`; required when Slack or GitHub is routed |
 | `ingester.replicas`, `.scheduleInterval`, `.reconcileInterval` | `0`, `10m`, `1h` | Defaults for every source |
 | `ingester.perSource.<source>.replicas` | `0` for `google-workspace` | 0 or 1 |
 | `ingester.perSource.<source>.existingSecret`, `.secretOptional` | `ingester-google`, `true` | Credential Secret of the source |

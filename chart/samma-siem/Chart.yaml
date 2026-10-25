@@ -3,8 +3,8 @@ name: samma-siem
 description: The Kubernetes SIEM of Samma - ingester, Vector, detection-engine, alert-destination and siem-storage over NATS JetStream, Quickwit and Grafana for search, with the streams and consumers and an optional MinIO.
 type: application
 # version and appVersion move together.
-version: 0.3.1
-appVersion: "0.3.1"
+version: 0.3.2
+appVersion: "0.3.2"
 kubeVersion: ">=1.25.0-0"
 home: https://samma.io
 sources:

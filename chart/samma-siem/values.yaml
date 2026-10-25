@@ -177,6 +177,10 @@ consumers:
     # storage-s3-alerts on SIEM_ALERTS: one object per alert, acked after the
     # PutObject. The service's own value.
     storageS3Alerts: 2m
+    # vector-alerts-quickwit on SIEM_ALERTS, only with vector.quickwitAlerts.
+    # Above the alerts sink's worst case: a 5s batch, then a 30s request
+    # retried for up to 30s.
+    vectorAlertsQuickwit: 120s
 
 # The image of the streams Job. Takes image, tag and digest: a digest
 # renders image@digest and wins over the tag.
@@ -318,6 +322,13 @@ workloads:
 # raw records. The config is baked into the image; the baked
 # vector-k8s.yaml reads the workspace lane (consumer vector-workspace). A
 # raw lane other than workspace needs an image whose config reads it.
+#
+# With quickwit.enabled the chart adds the image's overlay
+# /etc/vector/vector-k8s-quickwit.yaml (filtered Workspace records into the
+# logs-saas index, best-effort) and sets QUICKWIT_URL to this release's
+# Quickwit Service. f2f2dea predates the overlays and would not start with
+# them: with quickwit.enabled, set tag to an image built from samma-io/vector
+# main at 34806c1 or later.
 vector:
   enabled: true
   image: ghcr.io/samma-io/vector
@@ -326,7 +337,13 @@ vector:
   pullPolicy: IfNotPresent
   replicas: 1
   configPath: /etc/vector/vector-k8s.yaml
-  # Extra env, name: value. NATS_URL is set by the chart.
+  # With quickwit.enabled, also index detection alerts into Quickwit (overlay
+  # vector-k8s-quickwit-alerts.yaml). The streams Job then creates consumer
+  # vector-alerts-quickwit on SIEM_ALERTS (filter samma.alerts.>, AckWait
+  # consumers.ackWait.vectorAlertsQuickwit); Vector does not start without
+  # it. Refused without quickwit.enabled.
+  quickwitAlerts: false
+  # Extra env, name: value. NATS_URL and QUICKWIT_URL are set by the chart.
   env: {}
   resources:
     requests:
@@ -378,13 +395,20 @@ alertDestination:
   # table siem_alerts, with require_slack following slack.enabled. Set it to
   # a whole table (README "Routing table" of alert-destination) to replace it.
   routes: ""
-  # Slack and GitHub. The nats transport of alert-destination 779befa
-  # builds the postgres destination only and refuses a table that names
-  # slack or github, so leave this off until the image supports them.
+  # Slack and GitHub. 779befa builds only the postgres destination in its
+  # nats transport and refuses a table that names slack or github: routing to
+  # them needs tag set to an image built from samma-io/alert-destination
+  # main at e9987eb or later. slack.enabled is require_slack of the default
+  # table (and so needs routes); slack.enabled, or routes naming slack or
+  # github, needs existingSecret. The chart refuses either without it.
   slack:
     enabled: false
-  # Secret, by name, with the Slack and GitHub tokens, mounted read-only at
-  # /var/run/secrets/alert-destination. Never put a token in values.
+  # Secret, by name, with the tokens under the keys slack-token (Slack bot
+  # token) and github-token (GitHub fine-grained PAT), mounted whole and
+  # read-only at /var/run/secrets/alert-destination. With it set the chart
+  # sets ALERTDEST_SLACK_TOKEN_FILE and ALERTDEST_GITHUB_TOKEN_FILE to those
+  # two files; a key no route uses may be left out of the Secret. Never put a
+  # token in values.
   existingSecret: ""
   # Extra env, name: value (e.g. ALERTDEST_LOG_LEVEL: debug).
   env: {}

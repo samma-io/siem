@@ -328,3 +328,45 @@ argocd.argoproj.io/sync-wave: "1"
 {{- define "samma-siem.argocdWorkloadWave" -}}
 argocd.argoproj.io/sync-wave: "2"
 {{- end -}}
+
+{{- /*
+samma-siem.alertTokenDestinations: the token-holding destinations (slack,
+github) alert-destination will build, as a JSON list. Mirrors its
+routedDestinations: every deliveries[].to of routes[] and default. The
+default table names none; slack.enabled counts as slack.
+*/ -}}
+{{- define "samma-siem.alertTokenDestinations" -}}
+{{- $v := .Values.alertDestination -}}
+{{- $named := list -}}
+{{- if $v.slack.enabled }}{{ $named = append $named "slack" }}{{ end -}}
+{{- if $v.routes -}}
+{{- $t := fromYaml (toString $v.routes) -}}
+{{- if hasKey $t "Error" }}{{ fail (printf "alertDestination.routes is not a YAML routing table: %s" (get $t "Error")) }}{{ end -}}
+{{- $deliveries := list -}}
+{{- range ($t.routes | default list) }}{{ if kindIs "map" . }}{{ $deliveries = concat $deliveries (.deliveries | default list) }}{{ end }}{{ end -}}
+{{- with $t.default }}{{ if kindIs "map" . }}{{ $deliveries = concat $deliveries (.deliveries | default list) }}{{ end }}{{ end -}}
+{{- range $deliveries -}}
+{{- if kindIs "map" . -}}
+{{- $to := toString (.to | default "") -}}
+{{- if has $to (list "slack" "github") }}{{ $named = append $named $to }}{{ end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson (uniq $named | sortAlpha) -}}
+{{- end -}}
+
+{{- /*
+samma-siem.vectorQuickwitAlerts: "true" when Vector reads SIEM_ALERTS into
+Quickwit (vector.quickwitAlerts), which also needs the consumer
+vector-alerts-quickwit. Only with quickwit.enabled, and only when the Vector
+Deployment renders (vector.enabled and a lane with raw records): without a
+reader the consumer would only track unacked alerts.
+*/ -}}
+{{- define "samma-siem.vectorQuickwitAlerts" -}}
+{{- if .Values.vector.quickwitAlerts -}}
+{{- if not .Values.quickwit.enabled }}{{ fail "vector.quickwitAlerts needs quickwit.enabled: the alerts overlay posts to this release's Quickwit" }}{{ end -}}
+{{- $raw := false -}}
+{{- range include "samma-siem.lanes" . | fromJsonArray }}{{ if .raw }}{{ $raw = true }}{{ end }}{{ end -}}
+{{- if and .Values.vector.enabled $raw }}true{{ end -}}
+{{- end -}}
+{{- end -}}

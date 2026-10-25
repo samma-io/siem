@@ -18,3 +18,22 @@ grafana:
   enabled: true
   tag: ci-placeholder
   existingSecret: siem-grafana
+# Vector into Quickwit, logs and alerts (consumer vector-alerts-quickwit).
+vector:
+  quickwitAlerts: true
+# Slack and GitHub routes with their token Secret (keys slack-token,
+# github-token).
+alertDestination:
+  existingSecret: siem-alert-destination
+  routes: |
+    require_slack: false
+    routes:
+      - level: critical
+        log_source: "*"
+        deliveries:
+          - {to: postgres, target: siem_alerts}
+          - {to: slack, target: C0EXAMPLE1}
+          - {to: github, target: example-org/detections}
+      - {level: "*", log_source: "*", deliveries: [{to: postgres, target: siem_alerts}]}
+    default:
+      deliveries: [{to: postgres, target: siem_alerts}]
