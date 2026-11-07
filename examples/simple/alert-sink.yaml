@@ -68,8 +68,11 @@ data:
           }
 
           # Determine ES index by alert severity
+          # rule.severity is the older alert format, rule.level is detection.alert.v1.
           severity = if exists(.rule.severity) {
             downcase(string!(.rule.severity))
+          } else if exists(.rule.level) {
+            downcase(string!(.rule.level))
           } else {
             "unknown"
           }

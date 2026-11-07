@@ -95,7 +95,7 @@ data:
     type = "remap"
     inputs = ["nats_alerts"]
     source = '''
-      .severity  = string(.rule.severity) ?? "unknown"
+      .severity  = string(.rule.severity) ?? string(.rule.level) ?? "unknown"
       .rule_name = string(.rule.name)     ?? "unknown"
       .message   = encode_json(.)
     '''
