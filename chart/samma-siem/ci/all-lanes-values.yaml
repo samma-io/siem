@@ -1,10 +1,11 @@
 # Every lane of the contract that runs on Kubernetes: the Workspace SaaS
-# lane plus the NATS-only k8s and scanner lanes, which have no raw records.
+# lane plus the NATS-only k8s, scanner and wazuh lanes, which have no raw records.
 # Used by CI (helm lint, helm template, hack/check-chart.sh).
 lanes:
   - workspace
   - {name: k8s, raw: false}
   - {name: scanner, raw: false}
+  - {name: wazuh, raw: false}
 # The k8s lane adds streams.logs.laneMaxBytes.k8s (2GiB) to SIEM_LOGS: the
 # JetStream PVC grows with it (710 MiB + 2GiB of caps).
 nats:

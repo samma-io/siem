@@ -126,7 +126,7 @@ want_cons=$(printf '%s\n' SIEM_ALERTS.alert-destination SIEM_ALERTS.storage-s3-a
 [ "$(consumers)" = "$want_cons" ] || fail "default consumers: $(consumers | tr '\n' ' ')"
 grep -qE 'name: ci-samma-siem-(quickwit|grafana)$' <<<"$out" && fail "quickwit or grafana rendered by default"
 check_workload ci-samma-siem-detection-engine-workspace \
-  'image: ghcr.io/samma-io/detection-engine:d5d7439' \
+  'image: ghcr.io/samma-io/detection-engine:65cbbd0' \
   '- name: ENGINE_TRANSPORT' 'value: "workspace"' "$nats" \
   'value: "detection-engine-workspace"' 'value: "samma.logs.workspace"' \
   '- name: ENGINE_VISIBILITY_TIMEOUT' 'value: "300s"' 'path: /readyz'
@@ -318,13 +318,13 @@ check_workload ci-samma-siem-alert-destination \
 grep -qE '^kind: Ingress' <<<"$out" && fail "all-enabled render contains an Ingress"
 grep -qE 'type: (NodePort|LoadBalancer)' <<<"$out" && fail "all-enabled render exposes a Service outside the cluster"
 
-# Every lane: workspace plus the NATS-only k8s and scanner lanes.
+# Every lane: workspace plus the NATS-only k8s, scanner and wazuh lanes.
 out=$(render -f "$chart/ci/all-lanes-values.yaml")
 want_deps=$(printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-detection-engine-k8s \
-  ci-samma-siem-detection-engine-scanner ci-samma-siem-detection-engine-workspace \
+  ci-samma-siem-detection-engine-scanner ci-samma-siem-detection-engine-wazuh ci-samma-siem-detection-engine-workspace \
   ci-samma-siem-ingester-google-workspace ci-samma-siem-siem-storage ci-samma-siem-vector | sort)
 [ "$(deployments)" = "$want_deps" ] || fail "all-lanes Deployments: $(deployments | tr '\n' ' ')"
-for lane in workspace k8s scanner; do
+for lane in workspace k8s scanner wazuh; do
   check_workload "ci-samma-siem-detection-engine-$lane" \
     "value: \"$lane\"" "value: \"detection-engine-$lane\"" "value: \"samma.logs.$lane\"" "$nats"
   grep -qF "consumer.SIEM_LOGS.detection-engine-$lane.json:" <<<"$out" || fail "no detection-engine-$lane consumer"
