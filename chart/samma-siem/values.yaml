@@ -18,10 +18,11 @@
 # stream on samma.logs.> would fill its byte cap within the hour.
 #
 # An entry is a lane name, or {name, raw} where raw: false leaves the lane
-# out of SIEM_RAW (no samma.raw.<lane>, no vector-<lane> consumer). The k8s
-# and scanner lanes of the contract have no raw records.
+# out of SIEM_RAW (no samma.raw.<lane>, no vector-<lane> consumer). The k8s,
+# scanner and wazuh lanes of the contract have no raw records.
 #   - workspace
 #   - {name: k8s, raw: false}
+#   - {name: wazuh, raw: false}
 lanes:
   - workspace
 
@@ -426,13 +427,13 @@ vector:
 # detection.alert.v1 to samma.alerts.<lane>. The rules are baked into the
 # image (/rules). ENGINE_VISIBILITY_TIMEOUT is consumers.ackWait.detectionEngine.
 #
-# d5d7439 knows the SaaS lanes only. The k8s and scanner lanes (and their
-# rules) are in detection-engine main from 0c5b5ce on; set tag to an image
-# built from there before adding them.
+# 65cbbd0 knows the SaaS, k8s, scanner and wazuh lanes. wazuh is NATS-only:
+# add it as {name: wazuh, raw: false}. Older images refuse lanes they do not
+# know: k8s and scanner need 0c5b5ce or later, wazuh needs 65cbbd0 or later.
 detectionEngine:
   enabled: true
   image: ghcr.io/samma-io/detection-engine
-  tag: d5d7439
+  tag: 65cbbd0
   digest: ""
   pullPolicy: IfNotPresent
   replicas: 1

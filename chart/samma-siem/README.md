@@ -232,16 +232,16 @@ are the tags running on v2:
 |---|---|---|
 | `ingester` | `89ed408` | NATS transport (ingester#5); no token files (Slack, 1Password and Cloudflare need `b4c844c` or later) |
 | `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane; no Quickwit overlays (needs `34806c1` or later with `quickwit.enabled`, `5fbdb00` or later with it and the k8s or scanner lane) |
-| `detectionEngine` | `d5d7439` | NATS transport; knows the SaaS lanes only |
+| `detectionEngine` | `65cbbd0` | NATS transport; knows the SaaS, k8s, scanner and wazuh lanes. Runs the wazuh lane on v2; the workspace lane there is still on `d5d7439` |
 | `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination; no Slack or GitHub (needs `e9987eb` or later to route to them) |
 | `storage` | `sha-6c3f143` | siem-storage `main` with the Postgres and S3 backends, built by its CI |
 | `quickwit` | none, required | pushed by hand, see "Images built by hand" |
 | `grafana` | none, required | pushed by hand, see "Images built by hand" |
 
 **Lanes that need a newer image.** The `k8s` and `scanner` lanes and their rules
-are in detection-engine `main` from `0c5b5ce` on, and `d5d7439` refuses
-`ENGINE_LOG_SOURCE=k8s`. Set `detectionEngine.tag` to an image built from there
-before adding them. The baked Vector config reads only `vector-workspace`, so a
+are in detection-engine `main` from `0c5b5ce` on, and the `wazuh` lane from
+`65cbbd0` on. An older image refuses a lane it does not know, so keep
+`detectionEngine.tag` at or above those when overriding it. The baked Vector config reads only `vector-workspace`, so a
 raw lane other than `workspace` needs a Vector image whose config reads it.
 With `quickwit.enabled`, Vector gets the Quickwit overlays, which are in
 samma-io/vector `main` from `34806c1` on (the k8s and scanner ones from `5fbdb00`
