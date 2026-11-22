@@ -219,6 +219,7 @@ deployment running on v2 (`samma-io/deploy` `siem/`).
 | `<release>-siem-storage` | release, `storage.enabled` | `SIEM_LOGS` (`storage-logs`, `storage-s3-logs`), `SIEM_ALERTS` (`storage-s3-alerts`) | `siem_events`, the S3 archive | `STORAGE_BACKENDS=postgres,s3`, binds to the Job's consumers |
 | `<release>-quickwit` | release, `quickwit.enabled` | ingest API | index on S3, metastore in Postgres | `QW_MODE=k8s`, `Recreate`, one replica, ClusterIP Service on `:7280` |
 | `<release>-grafana` | release, `grafana.enabled` | Quickwit, `siem_alerts` | nothing | k8s provisioning, runs as uid 472, ClusterIP Service on `:3000` |
+| `<release>-reporter` | release, `dashboard.enabled` | each engine's `:9090`, consumer info on `SIEM_LOGS`, a count of `siem_alerts`, this namespace's Deployments and StatefulSets | one HTTPS POST to `dashboard.url` every `reporter.intervalSeconds` | `Recreate`, one replica. The only workload with a Kubernetes API token: a projected token for a namespaced Role (`get`, `list` on Deployments and StatefulSets) |
 
 All of them use the chart's NATS URL: the in-release Service with
 `nats.enabled`, else `externalNats.url`. Until the streams Job has created their
@@ -315,6 +316,40 @@ without `existingSecret`. Tokens never go in values.
 `ingester.perSource.<source>.env` take `NAME: value` settings from the service's
 README. A name the chart sets (the transport, NATS, Postgres, routes, token files, `INGESTER_SECRETS`, `QUICKWIT_URL`) is refused,
 and an empty value is left out.
+
+## Reporting to the Samma dashboard
+
+Off by default. With `dashboard.enabled`, `siem-reporter` tells the Samma
+dashboard every five minutes which detection lanes run and on which engine
+version, whether this release's workloads are ready and on which image tag, and
+how many alerts fired per level in the last 24 hours, 7 days and per day for 14
+days. It sends counts and versions only: no rule names, hosts, log lines or
+alert content leave the cluster. The connection is outbound HTTPS to
+`dashboard.url`; nothing connects in.
+
+1. In the dashboard: **SIEM**, **New SIEM**, **Connect a running SIEM**. The
+   key is shown once.
+2. Put the key in a Secret (paste, Enter, Ctrl-D), so it is in no values file:
+
+   ```sh
+   kubectl -n <namespace> create secret generic siem-dashboard-key --from-file=key=/dev/stdin
+   ```
+
+3. Set the values and upgrade:
+
+   ```yaml
+   dashboard:
+     enabled: true
+     existingSecret: siem-dashboard-key
+   ```
+
+`dashboard.key` takes the key in values instead; the chart then creates the
+Secret. The reporter Deployment is Ready when the dashboard accepted its last
+report, so a wrong key shows as `0/1`. After a key rotation on the dashboard,
+update the Secret; the next report uses it without a restart.
+
+Workloads of other charts (a NATS of your own, a collector) are reported next
+to this release's when their label selector is in `reporter.componentSelectors`.
 
 ## Storage, search and dashboards
 
@@ -498,6 +533,14 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | `minioClient.image`, `.tag`, `.digest` | `cgr.dev/chainguard/minio-client` + digest | Image of the bucket Job |
 | `minio.enabled` | `true` | Install the `minio` chart (5.4.0), standalone, one 10Gi PVC |
 | `minio.existingSecret` | empty | Secret with `rootUser` and `rootPassword` |
+| `dashboard.enabled` | `false` | Report to the Samma dashboard, see "Reporting to the Samma dashboard" |
+| `dashboard.url` | `https://www.samma.io` | Dashboard base URL; must be `https` |
+| `dashboard.key` | empty | The SIEM key; the chart makes Secret `<release>-samma-siem-reporter-key` |
+| `dashboard.existingSecret`, `dashboard.secretKey` | empty, `key` | A Secret holding the SIEM key instead of `dashboard.key` |
+| `reporter.image`, `.tag`, `.digest` | `ghcr.io/samma-io/siem-reporter` `1588beb` | Image of the reporter |
+| `reporter.intervalSeconds` | `300` | Seconds between reports, at least 60 |
+| `reporter.componentSelectors` | `[]` | Label selectors of more workloads to report |
+| `reporter.env` | `{}` | Extra `REPORTER_*` env |
 | `minio.*` | | Passed to the [minio chart](https://github.com/minio/minio/tree/master/helm/minio) |
 | `postgres.existingSecret` | `siem-postgres` | Secret holding a DSN for the existing TimescaleDB (database `siem`, never `scan_results`); required by the ingester and alert-destination |
 | `postgres.dsnKey` | `dsn` | Key of the DSN in that Secret |
