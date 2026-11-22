@@ -198,11 +198,24 @@ all_values=(-f "$chart/ci/all-enabled-values.yaml")
 out=$(render "${all_values[@]}")
 saas='workspace slack onepassword cloudflare'
 want_deps=$( (printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-grafana ci-samma-siem-quickwit \
-  ci-samma-siem-siem-storage ci-samma-siem-vector ci-samma-siem-detection-engine-k8s ci-samma-siem-detection-engine-scanner \
+  ci-samma-siem-reporter ci-samma-siem-siem-storage ci-samma-siem-vector ci-samma-siem-detection-engine-k8s ci-samma-siem-detection-engine-scanner \
   ci-samma-siem-ingester-google-workspace ci-samma-siem-ingester-slack ci-samma-siem-ingester-onepassword ci-samma-siem-ingester-cloudflare
   for l in $saas; do echo "ci-samma-siem-detection-engine-$l"; done) | sort)
 [ "$(deployments)" = "$want_deps" ] || fail "all-enabled Deployments: $(deployments | tr '\n' ' ')"
 check_waves
+# The dashboard reporter: every lane's engine, the key from the named Secret,
+# a token for the namespaced Role only, and nothing but https.
+check_workload ci-samma-siem-reporter \
+  'image: ghcr.io/samma-io/siem-reporter:' 'type: Recreate' 'serviceAccountName: ci-samma-siem-reporter' \
+  'value: "https://www.samma.io"' 'value: /var/run/secrets/siem-dashboard/key' 'secretName: siem-dashboard-key' \
+  'workspace=http://ci-samma-siem-detection-engine-workspace:9090' 'scanner=http://ci-samma-siem-detection-engine-scanner:9090' \
+  'value: "app.kubernetes.io/part-of=siem,app.kubernetes.io/instance=ci;app.kubernetes.io/name=nats"' \
+  'value: /var/run/secrets/siem-postgres/dsn' 'secretName: siem-postgres' 'serviceAccountToken:' 'path: /readyz'
+role=$(doc ci-samma-siem-reporter Role)
+grep -qF 'resources: ["deployments", "statefulsets"]' <<<"$role" || fail "the reporter Role lacks deployments and statefulsets"
+grep -qF 'verbs: ["get", "list"]' <<<"$role" || fail "the reporter Role is not read-only"
+grep -qE '^kind: ClusterRole' <<<"$out" && grep -qF 'ci-samma-siem-reporter' <<<"$(grep -A6 -E '^kind: ClusterRole' <<<"$out")" && fail "the reporter has a ClusterRole"
+grep -qF 'name: ci-samma-siem-reporter-key' <<<"$out" && fail "a key Secret rendered next to dashboard.existingSecret"
 want_svcs=$( (printf '%s\n' ci-samma-siem-detection-engine-k8s ci-samma-siem-detection-engine-scanner \
   ci-samma-siem-grafana ci-samma-siem-quickwit
   for l in $saas; do echo "ci-samma-siem-detection-engine-$l"; done) | sort)
@@ -472,5 +485,22 @@ render --set vector.quickwitAlerts=true >/dev/null 2>&1 && fail "vector.quickwit
 render --set vector.quickwitAlerts=true --set streams.enabled=false >/dev/null 2>&1 && fail "vector.quickwitAlerts rendered without quickwit.enabled (no streams)"
 render "${all[@]}" --set-json 'vector.env={"QUICKWIT_URL":"http://x"}' >/dev/null 2>&1 && fail "QUICKWIT_URL was overridden through vector.env"
 render --set-json 'vector.env={"QUICKWIT_URL":"http://x"}' >/dev/null 2>&1 && fail "QUICKWIT_URL was set through vector.env without quickwit"
+
+# The dashboard reporter: off by default, and refused without a key, with two
+# keys, over plain http, without engines or reporting too often.
+out=$(render)
+grep -qF 'siem-reporter' <<<"$out" && fail "the reporter rendered by default"
+grep -qE '^kind: (Role|RoleBinding)$' <<<"$out" && fail "a Role rendered by default"
+out=$(render --set dashboard.enabled=true --set dashboard.key=samma_siem_ci)
+grep -qF 'key: "samma_siem_ci"' <<<"$(doc ci-samma-siem-reporter-key Secret)" || fail "dashboard.key did not render its Secret"
+grep -qF 'secretName: ci-samma-siem-reporter-key' <<<"$(doc ci-samma-siem-reporter Deployment)" || fail "the reporter does not mount the chart's key Secret"
+grep -qF 'checksum/key:' <<<"$(doc ci-samma-siem-reporter Deployment)" || fail "a changed dashboard.key does not restart the reporter"
+grep -cF 'samma_siem_ci' <<<"$out" | grep -qx 1 || fail "the SIEM key is rendered outside its Secret"
+render --set dashboard.enabled=true >/dev/null 2>&1 && fail "the reporter rendered without a key"
+render --set dashboard.enabled=true --set dashboard.key=k --set dashboard.existingSecret=s >/dev/null 2>&1 && fail "the reporter rendered with two keys"
+render --set dashboard.enabled=true --set dashboard.key=k --set dashboard.url=http://dashboard >/dev/null 2>&1 && fail "the reporter rendered with an http dashboard"
+render --set dashboard.enabled=true --set dashboard.key=k --set detectionEngine.enabled=false >/dev/null 2>&1 && fail "the reporter rendered without engines"
+render --set dashboard.enabled=true --set dashboard.key=k --set reporter.intervalSeconds=5 >/dev/null 2>&1 && fail "the reporter rendered with a 5 second interval"
+render --set dashboard.enabled=true --set dashboard.key=k --set-json 'reporter.env={"REPORTER_ALLOW_HTTP":"true"}' >/dev/null 2>&1 && fail "REPORTER_ALLOW_HTTP was set through reporter.env"
 
 echo "chart render checks passed"

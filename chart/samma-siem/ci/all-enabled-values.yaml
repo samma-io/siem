@@ -65,3 +65,10 @@ ingester:
       env:
         INGESTER_CLOUDFLARE_ACCOUNT_ID: 0123456789abcdef0123456789abcdef
         INGESTER_CLOUDFLARE_ZONE_IDS: 0123456789abcdef0123456789abcdef
+# The dashboard reporter, key from a Secret, with one more selector.
+dashboard:
+  enabled: true
+  existingSecret: siem-dashboard-key
+reporter:
+  componentSelectors:
+    - app.kubernetes.io/name=nats

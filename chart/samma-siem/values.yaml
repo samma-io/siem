@@ -527,6 +527,50 @@ storage:
     limits:
       memory: 256Mi
 
+# Report this SIEM to the Samma dashboard: detection lanes and their engine
+# versions, the ready state and image tag of this release's workloads, and
+# alert counts per level. Counts and versions only: no rule names, hosts or
+# alert content leave the cluster. Outbound HTTPS only, nothing connects in.
+#
+# The SIEM key comes from the dashboard (SIEM, New SIEM, Connect a running
+# SIEM) and is shown once. Prefer existingSecret, so the key is in no values
+# file:
+#   kubectl -n <namespace> create secret generic siem-dashboard-key --from-file=key=/dev/stdin
+dashboard:
+  enabled: false
+  url: https://www.samma.io
+  # The SIEM key (samma_siem_...). The chart puts it in Secret
+  # <release>-samma-siem-reporter-key.
+  key: ""
+  # A Secret that holds the key instead, under secretKey.
+  existingSecret: ""
+  secretKey: key
+
+# siem-reporter (samma-io/siem-reporter), the Deployment behind dashboard.*.
+# Rendered only with dashboard.enabled. It has a namespaced Role to get and
+# list Deployments and StatefulSets, and counts siem_alerts in a read-only
+# transaction with the postgres.existingSecret DSN.
+reporter:
+  image: ghcr.io/samma-io/siem-reporter
+  # Built by siem-reporter CI from main.
+  tag: "1588beb"
+  digest: ""
+  pullPolicy: IfNotPresent
+  # Seconds between reports, at least 60. The dashboard shows a SIEM as not
+  # reporting after 15 minutes.
+  intervalSeconds: 300
+  # Label selectors of more workloads to report next to this release's own,
+  # for example a NATS or collector installed by another chart.
+  componentSelectors: []
+  # Extra env, name: value (REPORTER_* from the service's README).
+  env: {}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
 # Quickwit (samma-io/quickwit) in QW_MODE=k8s: search over the logs-saas,
 # logs-k8s, logs-scanner and alerts indexes (created at start by the image's
 # auto-bootstrap), metastore in Postgres, index data on S3. ClusterIP Service

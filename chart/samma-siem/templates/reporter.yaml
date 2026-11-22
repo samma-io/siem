@@ -1,0 +1,207 @@
+{{- if .Values.dashboard.enabled }}
+{{- /*
+siem-reporter: every reporter.intervalSeconds, one outbound POST to the Samma
+dashboard (dashboard.url) with the SIEM key: each lane's engine version and
+readiness, rules loaded, events waiting, alert counts per level, and the ready
+state and image tag of this release's workloads. Counts and versions only.
+
+It is the one workload with a Kubernetes API token: a namespaced Role to get
+and list Deployments and StatefulSets, mounted as a projected volume so the
+pod keeps automountServiceAccountToken: false like every other workload.
+*/ -}}
+{{- $v := .Values.reporter -}}
+{{- $d := .Values.dashboard -}}
+{{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "reporter") -}}
+{{- if not (hasPrefix "https://" (toString $d.url)) }}{{ fail "dashboard.url must be an https URL: the SIEM key travels in a header" }}{{ end -}}
+{{- if and (not $d.key) (not $d.existingSecret) }}{{ fail "dashboard.enabled needs dashboard.key or dashboard.existingSecret (the SIEM key from the dashboard)" }}{{ end -}}
+{{- if and $d.key $d.existingSecret }}{{ fail "set dashboard.key or dashboard.existingSecret, not both" }}{{ end -}}
+{{- if not .Values.detectionEngine.enabled }}{{ fail "dashboard.enabled reports the detection engines: detectionEngine.enabled must be true" }}{{ end -}}
+{{- if lt (int $v.intervalSeconds) 60 }}{{ fail "reporter.intervalSeconds must be at least 60" }}{{ end -}}
+{{- $secret := $d.existingSecret | default (printf "%s-key" $name) -}}
+{{- $engines := list -}}
+{{- range $lane := include "samma-siem.lanes" . | fromJsonArray -}}
+{{- $svc := include "samma-siem.workloadName" (dict "root" $ "suffix" (printf "detection-engine-%s" $lane.name)) -}}
+{{- $engines = append $engines (printf "%s=http://%s:9090" $lane.name $svc) -}}
+{{- end -}}
+{{- $selectors := prepend ($v.componentSelectors | default list) (printf "app.kubernetes.io/part-of=siem,app.kubernetes.io/instance=%s" .Release.Name) -}}
+{{- $reserved := list "REPORTER_DASHBOARD_URL" "REPORTER_ALLOW_HTTP" "REPORTER_KEY_FILE" "REPORTER_INTERVAL_SECONDS" "REPORTER_ENGINES" "REPORTER_NATS_URL" "REPORTER_NATS_STREAM" "REPORTER_POSTGRES_DSN_FILE" "REPORTER_COMPONENT_SELECTORS" "REPORTER_NAMESPACE" "REPORTER_HEALTH_ADDR" -}}
+{{- if $d.key }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reporter
+type: Opaque
+stringData:
+  {{ $d.secretKey }}: {{ $d.key | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reporter
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reporter
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reporter
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
+spec:
+  # One reporter per SIEM key: the dashboard refuses a second report within
+  # 20 seconds.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "reporter") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: reporter
+      annotations:
+        {{- if $d.key }}
+        checksum/key: {{ $d.key | sha256sum }}
+        {{- end }}
+        {{- with .Values.workloads.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" . | nindent 6 }}
+      serviceAccountName: {{ $name }}
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: reporter
+          image: {{ include "samma-siem.workloadImage" (dict "name" "reporter" "values" $v) }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          env:
+            - name: REPORTER_DASHBOARD_URL
+              value: {{ $d.url | quote }}
+            - name: REPORTER_KEY_FILE
+              value: /var/run/secrets/siem-dashboard/key
+            - name: REPORTER_INTERVAL_SECONDS
+              value: {{ $v.intervalSeconds | quote }}
+            - name: REPORTER_ENGINES
+              value: {{ join "," $engines | quote }}
+            - name: REPORTER_NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            - name: REPORTER_NATS_STREAM
+              value: SIEM_LOGS
+            {{- if .Values.alertDestination.enabled }}
+            # siem_alerts is alert-destination's table; the reporter only counts it.
+            - name: REPORTER_POSTGRES_DSN_FILE
+              value: /var/run/secrets/siem-postgres/dsn
+            {{- end }}
+            - name: REPORTER_COMPONENT_SELECTORS
+              value: {{ join ";" $selectors | quote }}
+            {{- with include "samma-siem.extraEnv" (dict "env" $v.env "reserved" $reserved "what" "reporter.env") | trim }}{{ . | nindent 12 }}{{ end }}
+          ports:
+            - name: health
+              containerPort: 9091
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 30
+            failureThreshold: 4
+          # Ready when the dashboard accepted the last report: a wrong key
+          # shows as 0/1.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 30
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: dashboard-key
+              mountPath: /var/run/secrets/siem-dashboard
+              readOnly: true
+            - name: kube-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            {{- if .Values.alertDestination.enabled }}
+            - name: postgres
+              mountPath: /var/run/secrets/siem-postgres
+              readOnly: true
+            {{- end }}
+      volumes:
+        # The whole Secret, never a subPath, so a rotated key reaches the file
+        # and is used by the next report without a restart.
+        - name: dashboard-key
+          secret:
+            secretName: {{ $secret }}
+            items:
+              - key: {{ $d.secretKey }}
+                path: key
+        - name: kube-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        {{- if .Values.alertDestination.enabled }}
+        - name: postgres
+          secret:
+            secretName: {{ include "samma-siem.postgresSecret" . }}
+            items:
+              - key: {{ .Values.postgres.dsnKey }}
+                path: dsn
+        {{- end }}
+{{- end }}
