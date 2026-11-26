@@ -1,0 +1,132 @@
+{{- if and (include "samma-siem.detectionEnabled" (dict "root" . "name" "osquery")) .Values.osqueryGateway.enabled }}
+{{- /*
+osquery gateway (samma-io/osquery-client gateway/): osqueryd TLS logger
+batches over mutual TLS -> one record per result -> samma.logs.osquery
+(SIEM_LOGS) -> detection-engine-osquery. files/osquery-gateway/ is a
+verbatim copy of that repo's gateway/.
+*/ -}}
+{{- $v := .Values.osqueryGateway -}}
+{{- if not $v.existingSecret -}}
+{{- fail "detections.osquery needs osqueryGateway.existingSecret: a Secret with server.crt, server.key and ca.crt (the CA that signs the host certificates; samma-io/osquery-client pki/)" -}}
+{{- end -}}
+{{- $type := toString $v.service.type -}}
+{{- if not (has $type (list "ClusterIP" "NodePort" "LoadBalancer")) }}{{ fail "osqueryGateway.service.type: ClusterIP, NodePort or LoadBalancer" }}{{ end -}}
+{{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "osquery-gateway") -}}
+{{- $files := printf "%s%s" (.Files.Get "files/osquery-gateway/vector.yaml") (.Files.Get "files/osquery-gateway/osquery.vrl") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: osquery-gateway
+data:
+  vector.yaml: |
+    {{- .Files.Get "files/osquery-gateway/vector.yaml" | nindent 4 }}
+  osquery.vrl: |
+    {{- .Files.Get "files/osquery-gateway/osquery.vrl" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: osquery-gateway
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "osquery-gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: osquery-gateway
+      annotations:
+        checksum/config: {{ $files | sha256sum }}
+        {{- with .Values.workloads.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" . | nindent 6 }}
+      # osqueryd keeps unacknowledged batches and retries, so a stop loses nothing.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vector
+          image: {{ include "samma-siem.workloadImage" (dict "name" "osqueryGateway" "values" $v) }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          args: ["--config", "/etc/osquery-gateway/vector.yaml"]
+          env:
+            - name: NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            - name: TLS_DIR
+              value: /etc/osquery-gateway/tls
+            - name: VRL_DIR
+              value: /etc/osquery-gateway
+          ports:
+            - name: osquery-tls
+              containerPort: 8443
+            - name: vector-api
+              containerPort: 8686
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: vector-api
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: vector-api
+            periodSeconds: 10
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/osquery-gateway
+              readOnly: true
+            - name: tls
+              mountPath: /etc/osquery-gateway/tls
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/vector
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: tls
+          secret:
+            secretName: {{ $v.existingSecret }}
+            # Readable by the workload uid whatever fsGroup the pod has.
+            defaultMode: 0444
+        - name: data
+          emptyDir: {}
+---
+# The osquery hosts' endpoint. ClusterIP by default; NodePort or
+# LoadBalancer only when osqueryGateway.service.type asks for it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: osquery-gateway
+spec:
+  type: {{ $type }}
+  selector:
+    {{- include "samma-siem.selectorLabels" (dict "root" . "component" "osquery-gateway") | nindent 4 }}
+  ports:
+    - name: osquery-tls
+      port: {{ $v.service.port }}
+      targetPort: osquery-tls
+      {{- if and (eq $type "NodePort") $v.service.nodePort }}
+      nodePort: {{ $v.service.nodePort }}
+      {{- end }}
+{{- end }}

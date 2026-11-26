@@ -59,7 +59,7 @@ pass re-reads: the longest application lookback (6h) plus the source's
 reconcile interval. Checked when the interval is a whole number with s, m,
 h or d.
 */ -}}
-{{- if and .Values.ingester.enabled $raw (has "google-workspace" (.Values.ingester.sources | default list)) -}}
+{{- if and .Values.ingester.enabled $raw (has "google-workspace" (include "samma-siem.ingesterSources" . | fromJsonArray)) -}}
 {{- $cfg := get (.Values.ingester.perSource | default dict) "google-workspace" | default dict -}}
 {{- $interval := toString (hasKey $cfg "reconcileInterval" | ternary $cfg.reconcileInterval .Values.ingester.reconcileInterval) -}}
 {{- if regexMatch "^[0-9]+[smhd]$" $interval -}}
@@ -84,7 +84,7 @@ h or d.
 {{- if include "samma-siem.vectorQuickwitAlerts" . -}}
 {{- $consumers = append $consumers (dict "stream" "SIEM_ALERTS" "name" "vector-alerts-quickwit" "filter" "samma.alerts.>" "ackWait" $c.ackWait.vectorAlertsQuickwit) -}}
 {{- end -}}
-{{- range .Values.ingester.sources -}}
+{{- range include "samma-siem.ingesterSources" . | fromJsonArray -}}
 {{- if not (regexMatch "^[a-z0-9]+(-[a-z0-9]+)*$" (toString .)) }}{{ fail (printf "ingester source %q: a lowercase name like google-workspace" (toString .)) }}{{ end -}}
 {{- $consumers = append $consumers (dict "stream" "INGESTER_SLICES" "name" (printf "ingester-%s" .) "filter" (printf "samma.ingester.slices.%s" .) "ackWait" $c.ackWait.ingester) -}}
 {{- end -}}
@@ -94,7 +94,7 @@ storage-s3-alerts for s3. The two on SIEM_LOGS filter on every lane's log
 subject. The S3 consumers hold messages unacked until their object is
 written, so they get the service's own max_ack_pending of 10000.
 */ -}}
-{{- if .Values.storage.enabled -}}
+{{- if and .Values.storage.enabled $logs -}}
 {{- $backends := include "samma-siem.storageBackends" . | fromJsonArray -}}
 {{- if has "postgres" $backends -}}
 {{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" "storage-logs" "filters" $logs "ackWait" $c.ackWait.storage) -}}

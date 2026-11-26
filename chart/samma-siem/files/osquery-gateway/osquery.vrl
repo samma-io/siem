@@ -1,0 +1,40 @@
+# One osquery TLS-logger batch in, one record per query result out.
+#
+# Out: the result as osquery wrote it (name, action, columns, hostIdentifier,
+# unixTime, calendarTime, ...) plus
+#   source       "osquery"            -- the lane, as on every SIEM record
+#   feed         "result"
+#   event_time   from unixTime, UTC, millisecond precision
+#   search_text  "<query name> <action> <columns as JSON>"
+#   gateway_peer the client's address as the gateway saw it. hostIdentifier is
+#                chosen by the client; this is not.
+# Anything that is not a result batch is dropped (abort, drop_on_abort).
+
+log_type = string(.log_type) ?? ""
+if log_type != "result" {
+  abort
+}
+results = array(.data) ?? []
+if length(results) == 0 {
+  abort
+}
+peer = string(.gateway_peer) ?? ""
+now_ts = now()
+
+. = map_values(results) -> |r| {
+  rec = object(r) ?? {"raw": r, "format": "not an object"}
+  ts = now_ts
+  secs, err = to_int(rec.unixTime)
+  if err == null && secs > 0 {
+    ts = from_unix_timestamp!(secs)
+  }
+  rec.source = "osquery"
+  rec.feed = "result"
+  rec.event_time = format_timestamp!(ts, "%Y-%m-%dT%H:%M:%S%.3fZ", timezone: "UTC")
+  rec.search_text = join!(
+    [string(rec.name) ?? "", string(rec.action) ?? "", encode_json(rec.columns)], " ")
+  if peer != "" {
+    rec.gateway_peer = peer
+  }
+  rec
+}

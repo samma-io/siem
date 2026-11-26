@@ -1,4 +1,4 @@
-{{- if .Values.storage.enabled }}
+{{- if include "samma-siem.storageOn" . }}
 {{- /*
 siem-storage: samma.logs.<lane> (consumer storage-logs on SIEM_LOGS) ->
 Postgres siem_events, and samma.logs.<lane> / samma.alerts.> (consumers

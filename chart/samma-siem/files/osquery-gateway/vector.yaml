@@ -1,0 +1,61 @@
+# osquery gateway: osquery's TLS logger -> NATS samma.logs.osquery.
+#
+# osqueryd POSTs batches to https://<gateway>/log as
+#   {"node_key": "", "log_type": "result" | "status", "data": [ {result}, ... ]}
+# The source only accepts clients that present a certificate signed by the CA in
+# ca_file (mutual TLS); there is no other credential. Each result becomes one
+# NATS message (osquery.vrl). Status logs are dropped.
+#
+# End-to-end acknowledgements with a memory buffer: osqueryd gets its HTTP 200
+# only after NATS JetStream has stored every record of the batch. Until then the
+# batch stays in osqueryd's own on-disk buffer and is retried, so the gateway
+# needs no volume and a gateway restart loses nothing.
+#
+# Environment: NATS_URL, OSQUERY_SUBJECT (default samma.logs.osquery),
+# TLS_DIR (default /etc/osquery-gateway/tls: server.crt, server.key, ca.crt).
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+acknowledgements:
+  enabled: true
+
+sources:
+  osquery_tls:
+    type: http_server
+    address: 0.0.0.0:8443
+    path: /log
+    strict_path: true
+    method: POST
+    host_key: gateway_peer
+    decoding:
+      codec: json
+    tls:
+      enabled: true
+      crt_file: ${TLS_DIR:-/etc/osquery-gateway/tls}/server.crt
+      key_file: ${TLS_DIR:-/etc/osquery-gateway/tls}/server.key
+      ca_file: ${TLS_DIR:-/etc/osquery-gateway/tls}/ca.crt
+      verify_certificate: true
+
+transforms:
+  osquery_split:
+    type: remap
+    inputs: [osquery_tls]
+    file: ${VRL_DIR:-/etc/osquery-gateway}/osquery.vrl
+    drop_on_abort: true
+    drop_on_error: true
+
+sinks:
+  nats_logs_osquery:
+    type: nats
+    inputs: [osquery_split]
+    url: ${NATS_URL}
+    connection_name: osquery-gateway
+    subject: ${OSQUERY_SUBJECT:-samma.logs.osquery}
+    jetstream: true
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 10000
+      when_full: block

@@ -61,6 +61,51 @@ created. With the default values the configs are identical except `SIEM_RAW`'s
 duplicate window, which that Job sets to 2h and this chart to 8h (see "Streams and
 consumers"); the Job edits it to 8h.
 
+## Detections
+
+Choose what you want detected; the chart deploys the whole lane for each one.
+
+```yaml
+detections:
+  workspace: {enabled: true}                        # the default
+  traefik: {enabled: true, namespaces: [traefik]}
+  osquery: {enabled: true}
+  wazuh: {enabled: true}
+osqueryGateway:
+  existingSecret: osquery-gateway-tls               # server.crt, server.key, ca.crt
+```
+
+| Detection | Lane and stream | What the chart deploys | Input |
+|---|---|---|---|
+| `workspace` | `workspace`, `SIEM_RAW` + `SIEM_LOGS` | ingester `google-workspace`, Vector, engine | Google Admin Reports API (credential in `ingester.perSource`) |
+| `slack` | `slack`, `SIEM_RAW` + `SIEM_LOGS` | ingester `slack`, engine | Slack audit API. Not detected yet: the baked Vector config normalises `workspace` only |
+| `onepassword` | `onepassword`, `SIEM_RAW` + `SIEM_LOGS` | ingester `onepassword`, engine | 1Password Events API. Not detected yet, as `slack` |
+| `cloudflare` | `cloudflare`, `SIEM_RAW` + `SIEM_LOGS` | ingester `cloudflare`, engine | Cloudflare APIs. Not detected yet, as `slack` |
+| `osquery` | `osquery`, `SIEM_LOGS` | osquery gateway (mutual TLS), engine | osquery-client hosts ([samma-io/osquery-client](https://github.com/samma-io/osquery-client)) |
+| `wazuh` | `wazuh`, `SIEM_LOGS` | engine | a Wazuh manager publishing `samma.logs.wazuh` (samma-io/wazuh-kubernetes collector) |
+| `k8s` | `k8s`, `SIEM_LOGS` | engine | API server audit events on `samma.logs.k8s`. Needs a 4Gi JetStream PVC (`streams.logs.laneMaxBytes.k8s`) |
+| `scanner` | `scanner`, `SIEM_LOGS` | engine | Samma scanner findings on `samma.logs.scanner` |
+| `traefik` | `traefik`, `SIEM_SERVICES` | k8s-log-router, engine | Traefik JSON access log from labelled pods, through a node shipper (see "Service lanes") |
+
+- The catalog is `files/detections.yaml`. An unknown name is refused, and so is a
+  SIEM with no detection at all.
+- After install, `NOTES` lists every enabled detection and what still has to feed
+  it: the router and gateway addresses, and the subject for the inputs this chart
+  does not run (`wazuh`, `k8s`, `scanner`).
+- **osquery gateway.** It needs `osqueryGateway.existingSecret`. Its Service is
+  ClusterIP unless you set `osqueryGateway.service.type` to `NodePort` (with
+  `nodePort`) or `LoadBalancer`, which hosts outside the cluster need. The config in
+  `files/osquery-gateway/` is a verbatim copy of osquery-client `gateway/`.
+- **Advanced.** `lanes`, `serviceLanes` and `ingester.sources` still add lanes,
+  service lanes and sources beyond the detections; they default to empty. An entry
+  in `lanes` replaces a detection's lane of the same name (for example to set
+  `raw: false`). A name in both `detections` and `serviceLanes` is refused.
+- **Storage.** siem-storage runs only when some detection uses `SIEM_LOGS`; service
+  lanes are detection only.
+- **Upgrading from 0.4.** `lanes` and `ingester.sources` now default to empty, and
+  `detections.workspace` is on, so the default install is unchanged. If you set
+  `lanes` to leave Workspace out, also set `detections.workspace.enabled: false`.
+
 ## Lanes
 
 A lane is on NATS when its subjects are captured by the streams. **List only the
@@ -91,7 +136,7 @@ Independent of lanes:
 | Stream | Subjects | Consumer |
 |---|---|---|
 | `SIEM_ALERTS` | `samma.alerts.>` | `alert-destination` |
-| `INGESTER_SLICES` (work queue) | `samma.ingester.slices.>` | `ingester-<source>` on `samma.ingester.slices.<source>`, for each of `ingester.sources` |
+| `INGESTER_SLICES` (work queue) | `samma.ingester.slices.>` | `ingester-<source>` on `samma.ingester.slices.<source>`, for each ingester source (enabled detections plus `ingester.sources`) |
 
 Adding a lane is a values change and an upgrade. The Job adds the subject to the
 stream and creates the consumers. Size the stream's byte cap for the new lane's
@@ -123,12 +168,12 @@ unfiltered in `SIEM_RAW` until its `maxAge`, and nothing reaches their
 
 A service lane carries the logs of chosen Kubernetes workloads, such as Traefik's
 access log, into detection. Opt a workload in by labelling its **pod template**
-`samma.io/detection: <lane>`, and list the lane here with the namespaces allowed to
-feed it:
+`samma.io/detection: <lane>`, and turn on its detection with the namespaces allowed
+to feed it (or, for a lane with no detection yet, list it in `serviceLanes`):
 
 ```yaml
-serviceLanes:
-  - {name: traefik, namespaces: [traefik]}
+detections:
+  traefik: {enabled: true, namespaces: [traefik]}
 ```
 
 ```
@@ -274,7 +319,7 @@ deployment running on v2 (`samma-io/deploy` `siem/`).
 
 | Deployment | One per | Reads | Writes | Notes |
 |---|---|---|---|---|
-| `<release>-ingester-<source>` | entry of `ingester.sources` | `INGESTER_SLICES` (`ingester-<source>`) | `samma.raw.<lane>`, `ingester_checkpoint` | `daemon`, `INGESTER_TRANSPORT=nats`, `Recreate`, at most one replica |
+| `<release>-ingester-<source>` | ingester source of a detection, or `ingester.sources` | `INGESTER_SLICES` (`ingester-<source>`) | `samma.raw.<lane>`, `ingester_checkpoint` | `daemon`, `INGESTER_TRANSPORT=nats`, `Recreate`, at most one replica |
 | `<release>-vector` | release, if a lane has raw records | `SIEM_RAW` (`vector-<lane>`); with `vector.quickwitAlerts` also `SIEM_ALERTS` (`vector-alerts-quickwit`); with `quickwit.enabled` and the k8s or scanner lane also `SIEM_LOGS` (`vector-quickwit-<lane>`) | `samma.logs.<lane>`; with `quickwit.enabled` also Quickwit | `--config /etc/vector/vector-k8s.yaml`, the config baked into the image, plus the Quickwit overlays (see "Quickwit") |
 | `<release>-detection-engine-<lane>` | entry of `lanes` | `SIEM_LOGS` (`detection-engine-<lane>`) | `samma.alerts.<lane>` | `ENGINE_TRANSPORT=nats`, rules baked in at `/rules`, ClusterIP Service on `:9090` |
 | `<release>-alert-destination` | release | `SIEM_ALERTS` (`alert-destination`) | `siem_alerts`, `alert_ledger`; Slack and GitHub when routed | `ALERTDEST_TRANSPORT=nats`, routes from ConfigMap `<release>-alert-routes`, tokens from `alertDestination.existingSecret` |
@@ -569,12 +614,17 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 
 | Key | Default | What |
 |---|---|---|
-| `lanes` | `[workspace]` | Deployed lanes, see "Lanes" |
-| `serviceLanes` | `[]` | `{name, namespaces}` per service lane, see "Service lanes" |
+| `detections.<name>.enabled` | `workspace` on, the rest off | Detections to deploy, see "Detections" |
+| `detections.traefik.namespaces` | `[traefik]` | Namespaces allowed to feed the Traefik lane |
+| `lanes` | `[]` | Advanced: lanes beyond the detections, see "Lanes" |
+| `serviceLanes` | `[]` | Advanced: `{name, namespaces}` per service lane beyond the detections, see "Service lanes" |
+| `osqueryGateway.existingSecret` | empty | TLS Secret of the osquery gateway, required with `detections.osquery` |
+| `osqueryGateway.service.{type,port,nodePort}` | `ClusterIP`, `8443`, none | How osquery hosts reach the gateway |
+| `osqueryGateway.{image,tag,replicas,resources}` | `timberio/vector`, `0.53.0-distroless-libc`, 1 | Gateway image and size |
 | `logRouter.enabled` | `true` | Render the log router when `serviceLanes` is not empty |
 | `logRouter.{image,tag,digest}` | `timberio/vector`, `0.53.0-distroless-libc` | Router image |
 | `logRouter.{replicas,resources}` | `1`, 50m/64Mi, 256Mi limit | Router size |
-| `ingester.sources` | `[google-workspace]` | Ingester sources with a slice consumer |
+| `ingester.sources` | `[]` | Advanced: ingester sources beyond the detections |
 | `nats.enabled` | `true` | Install the `nats` chart (2.15.0) with JetStream |
 | `nats.config.jetstream.fileStore.pvc.size` | `1Gi` | JetStream PVC; must hold the stream caps (`4Gi` with the `k8s` lane) |
 | `nats.config.jetstream.fileStore.pvc.storageClassName` | empty | StorageClass of the PVC |

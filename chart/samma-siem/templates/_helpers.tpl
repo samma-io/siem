@@ -137,8 +137,14 @@ a lowercase name (lane-names.md); a plain string has raw: true.
 */ -}}
 {{- define "samma-siem.lanes" -}}
 {{- $out := list -}}
-{{- if not .Values.lanes }}{{ fail "lanes must list at least one deployed lane" }}{{ end -}}
-{{- range .Values.lanes -}}
+{{- $seen := dict -}}
+{{- range include "samma-siem.detections" . | fromJsonArray -}}
+{{- if not .service -}}
+{{- $_ := set $seen .lane true -}}
+{{- $out = append $out (dict "name" .lane "raw" .raw) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.lanes | default list -}}
 {{- $lane := dict "name" "" "raw" true -}}
 {{- if kindIs "map" . -}}
 {{- $_ := set $lane "name" (toString (.name | default "")) -}}
@@ -149,9 +155,75 @@ a lowercase name (lane-names.md); a plain string has raw: true.
 {{- if not (regexMatch "^[a-z0-9]+(-[a-z0-9]+)*$" $lane.name) -}}
 {{- fail (printf "lane %q: a lane is a lowercase name like workspace, never a wildcard" $lane.name) -}}
 {{- end -}}
+{{- /* An entry here replaces a detection's lane of the same name (its raw wins). */ -}}
+{{- if hasKey $seen $lane.name -}}
+{{- $kept := list -}}
+{{- range $out }}{{ if eq .name $lane.name }}{{ $kept = append $kept $lane }}{{ else }}{{ $kept = append $kept . }}{{ end }}{{ end -}}
+{{- $out = $kept -}}
+{{- else -}}
+{{- $_ := set $seen $lane.name true -}}
 {{- $out = append $out $lane -}}
 {{- end -}}
+{{- end -}}
 {{- toJson $out -}}
+{{- end -}}
+
+{{- /*
+samma-siem.detections: the enabled entries of .Values.detections, each merged
+with its catalog entry in files/detections.yaml and its own name as .name,
+as a JSON list in catalog order. An unknown name is refused.
+*/ -}}
+{{- define "samma-siem.detections" -}}
+{{- $catalog := .Files.Get "files/detections.yaml" | fromYaml -}}
+{{- $want := .Values.detections | default dict -}}
+{{- range $name, $d := $want -}}
+{{- if not (hasKey $catalog $name) -}}
+{{- fail (printf "detections.%s: not a detection this chart knows; one of %s" $name (join ", " (keys $catalog | sortAlpha))) -}}
+{{- end -}}
+{{- if not (kindIs "map" $d) }}{{ fail (printf "detections.%s: a map like {enabled: true}" $name) }}{{ end -}}
+{{- end -}}
+{{- $out := list -}}
+{{- range $name := keys $catalog | sortAlpha -}}
+{{- $d := get $want $name | default dict -}}
+{{- if $d.enabled -}}
+{{- $entry := merge (dict "name" $name) (deepCopy (get $catalog $name)) -}}
+{{- if and (get $catalog $name).service (hasKey $d "namespaces") }}{{ $_ := set $entry "namespaces" $d.namespaces }}{{ end -}}
+{{- $out = append $out $entry -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}
+
+{{- /*
+samma-siem.storageOn: "true" when siem-storage runs: storage.enabled and at
+least one lane in SIEM_LOGS (service lanes are not stored).
+*/ -}}
+{{- define "samma-siem.storageOn" -}}
+{{- if and .Values.storage.enabled (include "samma-siem.lanes" . | fromJsonArray) }}true{{ end -}}
+{{- end -}}
+
+{{- /*
+samma-siem.detectionEnabled: "true" when detections.<name>.enabled.
+  {{ if include "samma-siem.detectionEnabled" (dict "root" . "name" "osquery") }}
+*/ -}}
+{{- define "samma-siem.detectionEnabled" -}}
+{{- $d := get (.root.Values.detections | default dict) .name | default dict -}}
+{{- if $d.enabled }}true{{ end -}}
+{{- end -}}
+
+{{- /*
+samma-siem.ingesterSources: the ingester sources of the enabled detections
+plus ingester.sources, without duplicates, as a JSON list.
+*/ -}}
+{{- define "samma-siem.ingesterSources" -}}
+{{- $out := list -}}
+{{- range include "samma-siem.detections" . | fromJsonArray -}}
+{{- if .ingester }}{{ $out = append $out .ingester }}{{ end -}}
+{{- end -}}
+{{- range .Values.ingester.sources | default list -}}
+{{- $out = append $out (toString .) -}}
+{{- end -}}
+{{- toJson ($out | uniq) -}}
 {{- end -}}
 
 {{- /*
@@ -163,13 +235,18 @@ validated. A name is also a lane name, so it may not be in lanes too.
 {{- $seen := dict -}}
 {{- $lanes := list -}}
 {{- range include "samma-siem.lanes" . | fromJsonArray }}{{ $lanes = append $lanes .name }}{{ end -}}
-{{- range .Values.serviceLanes | default list -}}
+{{- $entries := list -}}
+{{- range include "samma-siem.detections" . | fromJsonArray -}}
+{{- if .service }}{{ $entries = append $entries (dict "name" .lane "namespaces" .namespaces) }}{{ end -}}
+{{- end -}}
+{{- range .Values.serviceLanes | default list }}{{ $entries = append $entries . }}{{ end -}}
+{{- range $entries -}}
 {{- if not (kindIs "map" .) }}{{ fail (printf "serviceLanes entry %v: a map like {name: traefik, namespaces: [traefik]}" .) }}{{ end -}}
 {{- $name := toString (.name | default "") -}}
 {{- if not (regexMatch "^[a-z0-9]+(-[a-z0-9]+)*$" $name) -}}
 {{- fail (printf "serviceLanes %q: a lowercase name like traefik, never a wildcard" $name) -}}
 {{- end -}}
-{{- if hasKey $seen $name }}{{ fail (printf "serviceLanes %q is listed twice" $name) }}{{ end -}}
+{{- if hasKey $seen $name }}{{ fail (printf "serviceLanes %q is listed twice (also check detections.%s)" $name $name) }}{{ end -}}
 {{- $_ := set $seen $name true -}}
 {{- if has $name $lanes }}{{ fail (printf "serviceLanes %q is also in lanes: one engine per lane name" $name) }}{{ end -}}
 {{- $ns := .namespaces | default list -}}
@@ -194,6 +271,7 @@ lane on SIEM_LOGS and one per service lane on SIEM_SERVICES.
 {{- range include "samma-siem.serviceLanes" . | fromJsonArray -}}
 {{- $out = append $out (dict "name" .name "stream" "SIEM_SERVICES" "subject" (printf "samma.logs.svc.%s" .name)) -}}
 {{- end -}}
+{{- if not $out }}{{ fail "enable at least one detection (detections.<name>.enabled), or list a lane in lanes or serviceLanes" }}{{ end -}}
 {{- toJson $out -}}
 {{- end -}}
 
