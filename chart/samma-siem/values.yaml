@@ -59,7 +59,8 @@ lanes: []
 # parse is the router's parser: json (default) or keycloak (keeps only
 # org.keycloak.events lines). push: true makes a push lane (the tool POSTs to
 # the router's :8080/v1/<name>; no namespaces; parse json or trivy). The detection engine image must know the lane
-# (traefik: 5a4e082 or later; keycloak: samma-io/detection-engine#32).
+# (traefik: 5a4e082 or later; keycloak, falco, trivy, gatekeeper, openappsec:
+# 98dd141 or later).
 # Node shippers (fluent-bit, a Vector agent) are not part of this chart; point
 # them at the logRouter Service (README, "Service lanes").
 #   - {name: traefik, namespaces: [traefik]}
@@ -485,14 +486,16 @@ vector:
 # One more per entry in serviceLanes, bound to consumer detection-engine-<name>
 # on SIEM_SERVICES (samma.logs.svc.<name>).
 #
-# 5a4e082 knows the SaaS, k8s, scanner, wazuh, osquery and traefik lanes.
+# 98dd141 knows the SaaS, k8s, scanner, wazuh, osquery, traefik, keycloak,
+# falco, trivy, gatekeeper and openappsec lanes.
 # wazuh is NATS-only: add it as {name: wazuh, raw: false}. Older images
 # refuse lanes they do not know: k8s and scanner need 0c5b5ce or later, wazuh
-# 65cbbd0, osquery 659dc4a, traefik 5a4e082.
+# 65cbbd0, osquery 659dc4a, traefik 5a4e082, keycloak and the security tools
+# 98dd141 (which also has the k8s exec/secret tuning).
 detectionEngine:
   enabled: true
   image: ghcr.io/samma-io/detection-engine
-  tag: 5a4e082
+  tag: 98dd141
   digest: ""
   pullPolicy: IfNotPresent
   replicas: 1

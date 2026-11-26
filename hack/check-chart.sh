@@ -126,7 +126,7 @@ want_cons=$(printf '%s\n' SIEM_ALERTS.alert-destination SIEM_ALERTS.storage-s3-a
 [ "$(consumers)" = "$want_cons" ] || fail "default consumers: $(consumers | tr '\n' ' ')"
 grep -qE 'name: ci-samma-siem-(quickwit|grafana)$' <<<"$out" && fail "quickwit or grafana rendered by default"
 check_workload ci-samma-siem-detection-engine-workspace \
-  'image: ghcr.io/samma-io/detection-engine:5a4e082' \
+  'image: ghcr.io/samma-io/detection-engine:98dd141' \
   '- name: ENGINE_TRANSPORT' 'value: "workspace"' "$nats" \
   'value: "detection-engine-workspace"' 'value: "samma.logs.workspace"' \
   '- name: ENGINE_VISIBILITY_TIMEOUT' 'value: "300s"' 'path: /readyz'

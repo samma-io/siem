@@ -232,8 +232,8 @@ Each entry gives:
   failed events only, unless the container sets
   `KC_SPI_EVENTS_LISTENER_JBOSS_LOGGING_SUCCESS_LEVEL=info`.
 - **The engine image** must know the lane: `traefik` needs detection-engine `5a4e082`
-  or later, `keycloak` an image with samma-io/detection-engine#32, `falco`, `trivy`,
-  `gatekeeper` and `openappsec` one with #34, and the `k8s` exec/secret tuning #33.
+  or later; `keycloak`, `falco`, `trivy`, `gatekeeper` and `openappsec`, and the `k8s`
+  exec/secret tuning, need `98dd141` or later (the chart default).
   A name in both
   `lanes` and `serviceLanes` is refused.
 
@@ -406,7 +406,7 @@ are the tags running on v2:
 |---|---|---|
 | `ingester` | `89ed408` | NATS transport (ingester#5); no token files (Slack, 1Password and Cloudflare need `b4c844c` or later) |
 | `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane; no Quickwit overlays (needs `34806c1` or later with `quickwit.enabled`, `5fbdb00` or later with it and the k8s or scanner lane) |
-| `detectionEngine` | `5a4e082` | NATS transport; knows the SaaS, k8s, scanner, wazuh, osquery and traefik lanes. Runs the traefik lane on v2 |
+| `detectionEngine` | `98dd141` | NATS transport; knows the SaaS, k8s, scanner, wazuh, osquery, traefik, keycloak, falco, trivy, gatekeeper and openappsec lanes |
 | `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination; no Slack or GitHub (needs `e9987eb` or later to route to them) |
 | `storage` | `sha-6c3f143` | siem-storage `main` with the Postgres and S3 backends, built by its CI |
 | `quickwit` | none, required | pushed by hand, see "Images built by hand" |
@@ -414,7 +414,7 @@ are the tags running on v2:
 
 **Lanes that need a newer image.** The `k8s` and `scanner` lanes and their rules
 are in detection-engine `main` from `0c5b5ce` on, and the `wazuh` lane from
-`65cbbd0` on, `osquery` from `659dc4a` and `traefik` from `5a4e082`. An older image refuses a lane it does not know, so keep
+`65cbbd0` on, `osquery` from `659dc4a`, `traefik` from `5a4e082`, and `keycloak`, `falco`, `trivy`, `gatekeeper` and `openappsec` from `98dd141`. An older image refuses a lane it does not know, so keep
 `detectionEngine.tag` at or above those when overriding it. The baked Vector config reads only `vector-workspace`, so a
 raw lane other than `workspace` needs a Vector image whose config reads it.
 With `quickwit.enabled`, Vector gets the Quickwit overlays, which are in
