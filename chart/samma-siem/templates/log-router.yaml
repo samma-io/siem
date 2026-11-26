@@ -4,12 +4,23 @@
 k8s-log-router (samma-io/k8s-log-router): pod logs from node shippers ->
 allowlist (serviceLanes) -> samma.logs.svc.<lane> (SIEM_SERVICES). The
 config is files/k8s-log-router/, a verbatim copy of that repo's router/;
-the chart only replaces the VRL's lanes object with serviceLanes.
+the chart only replaces the VRL's lanes object with the log lanes of
+serviceLanes and push.vrl's push_parsers with its push lanes.
 */ -}}
 {{- $v := .Values.logRouter -}}
 {{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "k8s-log-router") -}}
 {{- $allow := dict -}}
-{{- range $services }}{{ $_ := set $allow .name .namespaces }}{{ end -}}
+{{- $push := dict -}}
+{{- range $services }}
+{{- if .push }}{{ $_ := set $push .name .parse }}{{ else }}{{ $_ := set $allow .name (dict "namespaces" .namespaces "parse" .parse) }}{{ end -}}
+{{- end -}}
+{{- if and $push (not $v.push.existingSecret) -}}
+{{- fail (printf "push lanes (%s) need logRouter.push.existingSecret: a Secret with PUSH_TOKEN_<LANE> for each" (join ", " (keys $push | sortAlpha))) -}}
+{{- end -}}
+{{- $pushVrl := .Files.Get "files/k8s-log-router/push.vrl" -}}
+{{- $pushRe := "(?s)\npush_parsers = \\{.*?\n\\}\n" -}}
+{{- if not (regexMatch $pushRe $pushVrl) }}{{ fail "files/k8s-log-router/push.vrl has no push_parsers = { ... } block to replace" }}{{ end -}}
+{{- $pushVrl = regexReplaceAll $pushRe $pushVrl (printf "\npush_parsers = %s\n" (toJson $push)) -}}
 {{- $vrl := .Files.Get "files/k8s-log-router/k8s-router.vrl" -}}
 {{- $lanesRe := "(?s)\nlanes = \\{.*?\n\\}\n" -}}
 {{- if not (regexMatch $lanesRe $vrl) }}{{ fail "files/k8s-log-router/k8s-router.vrl has no lanes = { ... } block to replace" }}{{ end -}}
@@ -27,6 +38,8 @@ data:
     {{- .Files.Get "files/k8s-log-router/vector.yaml" | nindent 4 }}
   k8s-router.vrl: |
     {{- $vrl | nindent 4 }}
+  push.vrl: |
+    {{- $pushVrl | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -50,7 +63,7 @@ spec:
         app.kubernetes.io/component: k8s-log-router
       annotations:
         # The allowlist is read at start: a change rolls the pods.
-        checksum/config: {{ printf "%s%s" (.Files.Get "files/k8s-log-router/vector.yaml") $vrl | sha256sum }}
+        checksum/config: {{ printf "%s%s%s" (.Files.Get "files/k8s-log-router/vector.yaml") $vrl $pushVrl | sha256sum }}
         {{- with .Values.workloads.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -67,11 +80,19 @@ spec:
               value: {{ include "samma-siem.natsUrl" . | quote }}
             - name: VRL_DIR
               value: /etc/k8s-log-router
+          {{- with $v.push.existingSecret }}
+          # Push lane tokens: PUSH_TOKEN_<LANE>. A lane without one gets 401.
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
           ports:
             - name: fluent
               containerPort: 24224
             - name: vector
               containerPort: 6000
+            - name: push
+              containerPort: 8080
             - name: vector-api
               containerPort: 8686
           livenessProbe:
@@ -121,4 +142,7 @@ spec:
     - name: vector
       port: 6000
       targetPort: vector
+    - name: push
+      port: 8080
+      targetPort: push
 {{- end }}

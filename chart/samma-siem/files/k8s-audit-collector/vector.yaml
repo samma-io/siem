@@ -1,0 +1,48 @@
+# k8s-audit-collector: Kubernetes API server audit log -> NATS samma.audit.k8s
+# (JetStream stream SIEM_AUDIT) -> detection-engine-k8s.
+#
+# Environment: NATS_URL (required), AUDIT_LOG (default
+# /var/log/audit/kube/kube-apiserver.log, the Talos path), VRL_DIR (default
+# /etc/k8s-audit-collector).
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+acknowledgements:
+  enabled: true
+
+sources:
+  audit_log:
+    type: file
+    include:
+      - ${AUDIT_LOG:-/var/log/audit/kube/kube-apiserver.log}
+    # data_dir is an emptyDir: after a restart, start at the end rather than
+    # replay the file and alert twice. Events written while the pod was
+    # down are missed.
+    read_from: end
+    fingerprint:
+      strategy: device_and_inode
+    max_line_bytes: 1048576
+
+transforms:
+  k8s_audit:
+    type: remap
+    inputs: [audit_log]
+    file: ${VRL_DIR:-/etc/k8s-audit-collector}/k8s-audit.vrl
+    drop_on_abort: true
+    drop_on_error: true
+
+sinks:
+  nats_audit:
+    type: nats
+    inputs: [k8s_audit]
+    url: ${NATS_URL}
+    connection_name: k8s-audit-collector
+    subject: samma.audit.k8s
+    jetstream: true
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 10000
+      when_full: block

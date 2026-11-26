@@ -1,0 +1,107 @@
+# One pushed JSON object in, one SIEM record out, or nothing.
+#
+# The http_server source has already checked the bearer token for the lane in
+# the path (/v1/<lane>), so only a lane with a PUSH_TOKEN_<LANE> gets here.
+#
+# Parsers (push_parsers, default "json"):
+#   json   the object as sent, at the top level.
+#   trivy  a trivy-operator report (operator.webhookBroadcastURL), reduced to
+#          what a rule needs: kind (VulnerabilityReport, ExposedSecretReport,
+#          ConfigAuditReport, RbacAssessmentReport, ...), the scanned
+#          resource and image, the summary counts, critical/high booleans and
+#          up to 20 critical or high findings. A full report can be megabytes;
+#          a matched secret's text is never kept.
+#
+# Out: plus the envelope, written last so the body cannot forge it:
+#   source       the lane (also the NATS subject suffix: samma.logs.svc.<lane>)
+#   feed         "push"
+#   event_time   when the router received it, UTC, millisecond precision
+#   search_text  the body, at most 2000 characters
+
+push_parsers = {
+  "trivy": "trivy"
+}
+
+m, err = parse_regex(string(._push_path) ?? "", r'^/v1/(?P<lane>[a-z0-9]+(-[a-z0-9]+)*)$')
+if err != null {
+  abort
+}
+lane = string!(m.lane)
+parser = string(get(push_parsers, [lane]) ?? "json") ?? "json"
+t = timestamp(.timestamp) ?? now()
+
+del(._push_path)
+del(.source_type)
+del(.timestamp)
+del(.Authorization)
+
+if parser == "trivy" {
+  md = object(.metadata) ?? {}
+  labels = object(md.labels) ?? {}
+  r = object(.report) ?? {}
+  s = object(r.summary) ?? {}
+  art = object(r.artifact) ?? {}
+  reg = object(r.registry) ?? {}
+
+  image = string(art.repository) ?? ""
+  if image != "" {
+    server = string(reg.server) ?? ""
+    if server != "" {
+      image = server + "/" + image
+    }
+    tag = string(art.tag) ?? ""
+    digest = string(art.digest) ?? ""
+    if tag != "" {
+      image = image + ":" + tag
+    } else if digest != "" {
+      image = image + "@" + digest
+    }
+  }
+
+  findings = []
+  for_each(array(r.vulnerabilities) ?? []) -> |_i, v| {
+    sev = string(v.severity) ?? ""
+    if sev == "CRITICAL" || sev == "HIGH" {
+      findings = push(findings, {"id": v.vulnerabilityID, "severity": sev, "package": v.resource,
+        "installed": v.installedVersion, "fixed": v.fixedVersion, "title": truncate(string(v.title) ?? "", 200)})
+    }
+  }
+  for_each(array(r.secrets) ?? []) -> |_i, v| {
+    findings = push(findings, {"id": v.ruleID, "severity": v.severity, "category": v.category,
+      "title": v.title, "target": v.target})
+  }
+  for_each(array(r.checks) ?? []) -> |_i, v| {
+    sev = string(v.severity) ?? ""
+    if (v.success == false) && (sev == "CRITICAL" || sev == "HIGH") {
+      findings = push(findings, {"id": v.checkID, "severity": sev, "title": truncate(string(v.title) ?? "", 200)})
+    }
+  }
+
+  critical = int(s.criticalCount) ?? 0
+  high = int(s.highCount) ?? 0
+  . = {
+    "kind": string(.kind) ?? "",
+    "report_name": string(md.name) ?? "",
+    "resource": {
+      "kind": string(get(labels, ["trivy-operator.resource.kind"]) ?? "") ?? "",
+      "name": string(get(labels, ["trivy-operator.resource.name"]) ?? "") ?? "",
+      "namespace": string(get(labels, ["trivy-operator.resource.namespace"]) ?? "") ?? string(md.namespace) ?? "",
+      "container": string(get(labels, ["trivy-operator.container.name"]) ?? "") ?? ""
+    },
+    "image": image,
+    "summary": s,
+    "critical": critical > 0,
+    "high": high > 0,
+    "secrets": length(array(r.secrets) ?? []),
+    "findings": findings
+  }
+  if length(findings) > 20 {
+    .findings = slice!(findings, 0, 20)
+  }
+}
+
+raw = encode_json(.)
+.source = lane
+.feed = "push"
+.event_time = format_timestamp!(t, "%Y-%m-%dT%H:%M:%S%.3fZ", timezone: "UTC")
+.search_text = truncate(raw, 2000)

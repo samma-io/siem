@@ -126,7 +126,7 @@ want_cons=$(printf '%s\n' SIEM_ALERTS.alert-destination SIEM_ALERTS.storage-s3-a
 [ "$(consumers)" = "$want_cons" ] || fail "default consumers: $(consumers | tr '\n' ' ')"
 grep -qE 'name: ci-samma-siem-(quickwit|grafana)$' <<<"$out" && fail "quickwit or grafana rendered by default"
 check_workload ci-samma-siem-detection-engine-workspace \
-  'image: ghcr.io/samma-io/detection-engine:5a4e082' \
+  'image: ghcr.io/samma-io/detection-engine:98dd141' \
   '- name: ENGINE_TRANSPORT' 'value: "workspace"' "$nats" \
   'value: "detection-engine-workspace"' 'value: "samma.logs.workspace"' \
   '- name: ENGINE_VISIBILITY_TIMEOUT' 'value: "300s"' 'path: /readyz'
@@ -518,7 +518,7 @@ for l in traefik vault; do
 done
 check_workload ci-samma-siem-k8s-log-router 'image: timberio/vector:0.53.0-distroless-libc' 'containerPort: 24224' \
   'containerPort: 6000' 'automountServiceAccountToken: false' 'checksum/config:'
-grep -qF 'lanes = {"traefik":["traefik"],"vault":["vault","vault-system"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" \
+grep -qF 'lanes = {"traefik":{"namespaces":["traefik"],"parse":"json"},"vault":{"namespaces":["vault","vault-system"],"parse":"json"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" \
   || fail "the router allowlist is not serviceLanes"
 grep -qE 'hostPath|serviceAccountName' <<<"$(doc ci-samma-siem-k8s-log-router Deployment)" && fail "the router has host mounts or an API identity"
 render --set-json 'serviceLanes=[{"name":"traefik"}]' >/dev/null 2>&1 && fail "a service lane rendered without namespaces"
@@ -532,9 +532,9 @@ out=$(render --set detections.workspace.enabled=false --set detections.traefik.e
   || fail "traefik only: $(deployments | tr '\n' ' ')"
 grep -qF 'stream.SIEM_LOGS.json' <<<"$out" && fail "traefik only still creates SIEM_LOGS"
 grep -qF 'storage-logs' <<<"$out" && fail "traefik only still creates storage-logs"
-grep -qF 'lanes = {"traefik":["traefik"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "traefik detection allowlist"
+grep -qF 'lanes = {"traefik":{"namespaces":["traefik"],"parse":"json"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "traefik detection allowlist"
 out=$(render --set detections.traefik.enabled=true --set-json 'detections.traefik.namespaces=["edge","traefik"]')
-grep -qF 'lanes = {"traefik":["edge","traefik"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "detections.traefik.namespaces not used"
+grep -qF 'lanes = {"traefik":{"namespaces":["edge","traefik"],"parse":"json"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "detections.traefik.namespaces not used"
 osq=(--set detections.osquery.enabled=true --set osqueryGateway.existingSecret=osq-tls)
 out=$(render "${osq[@]}" --set detections.wazuh.enabled=true)
 grep -qF '"subjects": ["samma.logs.osquery","samma.logs.wazuh","samma.logs.workspace"],' <<<"$(stream SIEM_LOGS)" || fail "osquery + wazuh SIEM_LOGS subjects"
@@ -550,5 +550,58 @@ render --set detections.workspace.enabled=false >/dev/null 2>&1 && fail "a SIEM 
 render --set detections.slack.enabled=true | grep -qF 'name: ci-samma-siem-ingester-slack' || fail "detections.slack did not add its ingester"
 render --set detections.traefik.enabled=true --set-json 'serviceLanes=[{"name":"traefik","namespaces":["x"]}]' >/dev/null 2>&1 \
   && fail "traefik in both detections and serviceLanes rendered"
+
+echo "== keycloak detection: keycloak parser, own engine on SIEM_SERVICES"
+out=$(render --set detections.keycloak.enabled=true --set-json 'detections.keycloak.namespaces=["wazuh","code"]')
+grep -qF 'lanes = {"keycloak":{"namespaces":["wazuh","code"],"parse":"keycloak"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" \
+  || fail "keycloak allowlist: $(doc ci-samma-siem-k8s-log-router ConfigMap | grep 'lanes = ')"
+grep -qF 'ci-samma-siem-detection-engine-keycloak' <<<"$out" || fail "no detection-engine-keycloak"
+grep -qF 'samma.logs.svc.keycloak' <<<"$out" || fail "no samma.logs.svc.keycloak consumer"
+grep -qF 'if parser == "keycloak"' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "router VRL has no keycloak parser"
+render --set-json 'serviceLanes=[{"name":"vault","namespaces":["vault"],"parse":"xml"}]' >/dev/null 2>&1 \
+  && fail "an unknown parser rendered"
+
+echo "== security tool detections: falco, gatekeeper, openappsec log lanes; trivy push lane"
+render --set detections.trivy.enabled=true >/dev/null 2>&1 && fail "trivy rendered without logRouter.push.existingSecret"
+out=$(render --set detections.falco.enabled=true --set detections.gatekeeper.enabled=true --set detections.openappsec.enabled=true \
+  --set detections.trivy.enabled=true --set logRouter.push.existingSecret=router-push)
+cm=$(doc ci-samma-siem-k8s-log-router ConfigMap)
+grep -qF 'lanes = {"falco":{"namespaces":["falco"],"parse":"json"},"gatekeeper":{"namespaces":["gatekeeper-system"],"parse":"json"},"openappsec":{"namespaces":["open-appsec"],"parse":"json"}}' <<<"$cm" \
+  || fail "security tool allowlist: $(grep 'lanes = ' <<<"$cm")"
+grep -qF 'push_parsers = {"trivy":"trivy"}' <<<"$cm" || fail "push_parsers: $(grep 'push_parsers = ' <<<"$cm")"
+grep -qF 'strategy: custom' <<<"$cm" || fail "router vector.yaml has no push auth"
+router=$(doc ci-samma-siem-k8s-log-router Deployment)
+grep -qF 'name: router-push' <<<"$router" || fail "router does not read the push Secret"
+grep -qF 'containerPort: 8080' <<<"$router" || fail "router has no push port"
+grep -qF 'port: 8080' <<<"$(doc ci-samma-siem-k8s-log-router Service)" || fail "router Service has no push port"
+for l in falco trivy gatekeeper openappsec; do
+  check_workload "ci-samma-siem-detection-engine-$l" "value: \"samma.logs.svc.$l\"" 'value: SIEM_SERVICES'
+  consumers | grep -qx "SIEM_SERVICES.detection-engine-$l" || fail "no SIEM_SERVICES.detection-engine-$l"
+done
+render --set-json 'serviceLanes=[{"name":"x","push":true,"parse":"keycloak"}]' --set logRouter.push.existingSecret=s >/dev/null 2>&1 \
+  && fail "a push lane with the keycloak log parser rendered"
+out=$(render --set-json 'serviceLanes=[{"name":"falco-push","push":true}]' --set logRouter.push.existingSecret=s)
+grep -qF 'push_parsers = {"falco-push":"json"}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "serviceLanes push entry"
+grep -qF 'lanes = {}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "a push lane is in the log allowlist"
+
+echo "== k8s detection: audit collector, SIEM_AUDIT, engine on samma.audit.k8s"
+out=$(render --set detections.k8s.enabled=true)
+ds=$(doc ci-samma-siem-k8s-audit-collector DaemonSet)
+[ -n "$ds" ] || fail "no k8s-audit-collector DaemonSet"
+for want in 'node-role.kubernetes.io/control-plane: ""' 'runAsUser: 65534' 'value: "/var/log/audit/kube/kube-apiserver.log"' \
+  'path: /var/log/audit/kube' 'readOnly: true' 'automountServiceAccountToken: false' 'readOnlyRootFilesystem: true'; do
+  grep -qF -- "$want" <<<"$ds" || fail "k8s-audit-collector lacks: $want"
+done
+grep -qF 'kubernetes.io/arch' <<<"$ds" && fail "k8s-audit-collector inherits workloads.nodeSelector"
+grep -qF 'subject: samma.audit.k8s' <<<"$(doc ci-samma-siem-k8s-audit-collector ConfigMap)" || fail "collector config subject"
+grep -qF '"subjects": ["samma.audit.k8s"],' <<<"$(stream SIEM_AUDIT)" || fail "SIEM_AUDIT subjects"
+grep -qF '"max_bytes": 67108864,' <<<"$(stream SIEM_AUDIT)" || fail "SIEM_AUDIT max_bytes"
+consumers | grep -qx 'SIEM_AUDIT.detection-engine-k8s' || fail "no SIEM_AUDIT.detection-engine-k8s"
+check_workload ci-samma-siem-detection-engine-k8s 'value: SIEM_AUDIT' 'value: "samma.audit.k8s"'
+grep -qF 'samma.logs.k8s"' <<<"$(stream SIEM_LOGS)" && fail "detections.k8s still captures samma.logs.k8s in SIEM_LOGS"
+out=$(render --set detections.k8s.enabled=true --set-json 'lanes=[{"name":"k8s","raw":false}]' --set nats.config.jetstream.fileStore.pvc.size=4Gi)
+[ -z "$(doc ci-samma-siem-k8s-audit-collector DaemonSet)" ] || fail "lanes k8s did not replace the audit collector"
+grep -qF 'stream.SIEM_AUDIT.json' <<<"$out" && fail "lanes k8s still creates SIEM_AUDIT"
+true
 
 echo "chart render checks passed"

@@ -16,10 +16,12 @@
 # where this chart can run it, the input (an ingester source, the osquery
 # gateway, the k8s log router). files/detections.yaml is the catalog; the
 # README, "Detections", lists what each one needs. Inputs this chart cannot
-# run (wazuh, k8s, scanner) are listed in NOTES after install.
+# run (wazuh, scanner) are listed in NOTES after install.
 #
-# traefik (and any service detection) takes namespaces: the namespaces whose
-# pods may feed it. osquery needs osqueryGateway.existingSecret.
+# traefik, keycloak, falco, gatekeeper, openappsec (and any service detection)
+# take namespaces: the namespaces whose pods may feed it. trivy is a push lane
+# and needs logRouter.push.existingSecret. k8s runs auditCollector on
+# control-plane nodes. osquery needs osqueryGateway.existingSecret.
 detections:
   workspace: {enabled: true}
   slack: {enabled: false}
@@ -30,6 +32,11 @@ detections:
   k8s: {enabled: false}
   scanner: {enabled: false}
   traefik: {enabled: false, namespaces: [traefik]}
+  keycloak: {enabled: false, namespaces: [keycloak]}
+  falco: {enabled: false, namespaces: [falco]}
+  trivy: {enabled: false}
+  gatekeeper: {enabled: false, namespaces: [gatekeeper-system]}
+  openappsec: {enabled: false, namespaces: [open-appsec]}
 
 # Advanced: lanes captured by the streams beyond the ones detections enable
 # (README, "Lanes"). Normally empty. Never a wildcard: the legacy pipeline
@@ -38,6 +45,8 @@ detections:
 #
 # An entry is a lane name, or {name, raw} where raw: false leaves the lane
 # out of SIEM_RAW (no samma.raw.<lane>, no vector-<lane> consumer).
+# {name: k8s, raw: false} here takes k8s audit events published by something
+# else to samma.logs.k8s, and replaces detections.k8s's audit collector.
 #   - {name: k8s, raw: false}
 lanes: []
 
@@ -47,10 +56,15 @@ lanes: []
 # for <name> is forwarded by the log router to samma.logs.svc.<name> (stream
 # SIEM_SERVICES) and gets its own detection-engine-<name>. Any other label
 # value or namespace is dropped, so a label cannot write into another lane.
-# The detection engine image must know the lane (traefik: 5a4e082 or later).
+# parse is the router's parser: json (default) or keycloak (keeps only
+# org.keycloak.events lines). push: true makes a push lane (the tool POSTs to
+# the router's :8080/v1/<name>; no namespaces; parse json or trivy). The detection engine image must know the lane
+# (traefik: 5a4e082 or later; keycloak, falco, trivy, gatekeeper, openappsec:
+# 98dd141 or later).
 # Node shippers (fluent-bit, a Vector agent) are not part of this chart; point
 # them at the logRouter Service (README, "Service lanes").
 #   - {name: traefik, namespaces: [traefik]}
+#   - {name: keycloak, namespaces: [keycloak], parse: keycloak}
 serviceLanes: []
 
 # The ingester: SaaS audit-log puller (samma-io/ingester), one Deployment
@@ -234,6 +248,13 @@ streams:
   services:
     maxAge: 24h
     maxBytes: 100MiB
+    duplicateWindow: 2m
+  # SIEM_AUDIT: samma.audit.k8s, API server audit events filtered by
+  # auditCollector (created only with detections.k8s). About 20 MB a day on
+  # a small cluster. Not stored by siem-storage: detection only.
+  audit:
+    maxAge: 3d
+    maxBytes: 64MiB
     duplicateWindow: 2m
   # INGESTER_SLICES: samma.ingester.slices.>, a work queue (a message is
   # gone once acked). Retention cannot be changed after creation.
@@ -465,14 +486,16 @@ vector:
 # One more per entry in serviceLanes, bound to consumer detection-engine-<name>
 # on SIEM_SERVICES (samma.logs.svc.<name>).
 #
-# 5a4e082 knows the SaaS, k8s, scanner, wazuh, osquery and traefik lanes.
+# 98dd141 knows the SaaS, k8s, scanner, wazuh, osquery, traefik, keycloak,
+# falco, trivy, gatekeeper and openappsec lanes.
 # wazuh is NATS-only: add it as {name: wazuh, raw: false}. Older images
 # refuse lanes they do not know: k8s and scanner need 0c5b5ce or later, wazuh
-# 65cbbd0, osquery 659dc4a, traefik 5a4e082.
+# 65cbbd0, osquery 659dc4a, traefik 5a4e082, keycloak and the security tools
+# 98dd141 (which also has the k8s exec/secret tuning).
 detectionEngine:
   enabled: true
   image: ghcr.io/samma-io/detection-engine
-  tag: 5a4e082
+  tag: 98dd141
   digest: ""
   pullPolicy: IfNotPresent
   replicas: 1
@@ -498,6 +521,37 @@ logRouter:
   digest: ""
   pullPolicy: IfNotPresent
   replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Push lanes (detections.trivy, serviceLanes with push: true): a Secret
+  # (created by hand) with PUSH_TOKEN_<LANE> for each, e.g. PUSH_TOKEN_TRIVY.
+  # The router answers 401 for a lane without a token.
+  push:
+    existingSecret: ""
+
+# k8s-audit-collector (samma-io/k8s-log-router audit/): rendered with
+# detections.k8s. A DaemonSet on control-plane nodes that tails the API
+# server audit log, keeps what detection rules use (well under 1% of it) and
+# publishes to samma.audit.k8s (SIEM_AUDIT). Runs as 65534 because Talos
+# writes the log as nobody, mode 0600; mounts logDir read-only.
+# kubeadm: logDir and logFile from --audit-log-path.
+auditCollector:
+  image: timberio/vector
+  tag: 0.53.0-distroless-libc
+  digest: ""
+  pullPolicy: IfNotPresent
+  runAsUser: 65534
+  logDir: /var/log/audit/kube
+  logFile: kube-apiserver.log
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+    - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+    - {key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule}
   resources:
     requests:
       cpu: 50m

@@ -14,17 +14,29 @@
 #   event_time   the shipper's timestamp, UTC, millisecond precision
 #   k8s          {namespace, pod, container, node}
 #   search_text  the line, at most 2000 characters
+#
+# Parsers (a lane's "parse", default "json"):
+#   json      a JSON line is merged at the top level; any other line is kept
+#             as .message. Traefik, Falco, Gatekeeper, open-appsec.
+#   keycloak  only org.keycloak.events lines are kept, every other line is
+#             dropped. The event's key="value" pairs (type, realmId, clientId,
+#             userId, ipAddress, error, ...) are top-level fields, plus .level.
+#             Works with the default text console log and with
+#             KC_LOG_CONSOLE_OUTPUT=json.
 
-# lane => namespaces whose pods may feed it.
+# lane => {namespaces whose pods may feed it, parser}.
 lanes = {
-  "traefik": ["traefik"]
+  "traefik": {"namespaces": ["traefik"], "parse": "json"},
+  "keycloak": {"namespaces": ["keycloak"], "parse": "keycloak"}
 }
 
 k = object(.kubernetes) ?? {}
 labels = object(k.labels) ?? object(k.pod_labels) ?? {}
 lane = string(labels."samma.io/detection") ?? ""
 ns = string(k.namespace_name) ?? string(k.pod_namespace) ?? ""
-allowed = array(get(lanes, [lane]) ?? []) ?? []
+cfg = object(get(lanes, [lane]) ?? {}) ?? {}
+allowed = array(cfg.namespaces) ?? []
+parser = string(cfg.parse) ?? "json"
 if lane == "" || ns == "" || !includes(allowed, ns) {
   abort
 }
@@ -37,6 +49,8 @@ meta = {
 }
 t = timestamp(.timestamp) ?? now()
 raw = string(.log) ?? string(.message) ?? ""
+# Set when fluent-bit's Merge_Log already parsed a JSON line.
+logger = string(.loggerName) ?? ""
 
 # Transport fields of fluent-bit and Vector; what remains is the application's.
 del(.kubernetes)
@@ -51,7 +65,35 @@ del(.file)
 del(.host)
 del(.logtag)
 
-if raw != "" {
+if parser == "keycloak" {
+  line = raw
+  level = string(.level) ?? ""
+  if logger == "" {
+    j, jerr = parse_json(raw)
+    if jerr == null && is_object(j) {
+      jo = object!(j)
+      logger = string(jo.loggerName) ?? ""
+      line = string(jo.message) ?? ""
+      level = string(jo.level) ?? ""
+    } else {
+      m, merr = parse_regex(raw, r'^\S+ \S+\s+(?P<level>[A-Z]+)\s+\[org\.keycloak\.events\] \([^)]*\) (?P<kv>.+)$')
+      if merr == null {
+        logger = "org.keycloak.events"
+        line = m.kv
+        level = m.level
+      }
+    }
+  }
+  if logger != "org.keycloak.events" {
+    abort
+  }
+  kv, kerr = parse_key_value(line, key_value_delimiter: "=", field_delimiter: ", ")
+  if kerr != null {
+    abort
+  }
+  . = filter(kv) -> |_key, value| { value != "null" && value != "" }
+  .level = level
+} else if raw != "" {
   parsed, err = parse_json(raw)
   if err == null && is_object(parsed) {
     . = merge(., object!(parsed))

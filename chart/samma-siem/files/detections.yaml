@@ -6,7 +6,14 @@
 #              rules/<lane>/ in the detection-engine image
 #   raw        the lane has raw records in SIEM_RAW (normalised by Vector)
 #   service    a service lane (SIEM_SERVICES, k8s-log-router); namespaces is
-#              the default allowlist, overridable per detection
+#              the default allowlist, overridable per detection; parse is
+#              the router's parser for the lane (json when unset)
+#   push       a push lane: the tool POSTs to the router's :8080/v1/<lane>
+#              with a bearer token (logRouter.push.existingSecret) instead of
+#              logging; no namespaces
+#   audit      the k8s lane from the API server audit log: the chart runs
+#              k8s-audit-collector on control-plane nodes, publishing to
+#              samma.audit.k8s in stream SIEM_AUDIT
 #   ingester   the ingester source that feeds the lane
 #   gateway    a gateway this chart deploys for the lane
 #   input      where the records come from, for NOTES and the README
@@ -41,8 +48,8 @@ wazuh:
   input: a Wazuh manager publishing alerts to samma.logs.wazuh (samma-io/wazuh-kubernetes collector)
 k8s:
   lane: k8s
-  raw: false
-  input: Kubernetes API server audit events published to samma.logs.k8s
+  audit: true
+  input: Kubernetes API server audit log, filtered on control-plane nodes by k8s-audit-collector (samma.audit.k8s)
 scanner:
   lane: scanner
   raw: false
@@ -52,3 +59,30 @@ traefik:
   service: true
   namespaces: [traefik]
   input: Traefik JSON access log from pods labelled samma.io/detection=traefik, through k8s-log-router
+keycloak:
+  lane: keycloak
+  service: true
+  namespaces: [keycloak]
+  parse: keycloak
+  input: Keycloak user events (org.keycloak.events) from pods labelled samma.io/detection=keycloak, through k8s-log-router
+falco:
+  lane: falco
+  service: true
+  namespaces: [falco]
+  input: Falco JSON alerts (json_output) from pods labelled samma.io/detection=falco, through k8s-log-router
+trivy:
+  lane: trivy
+  service: true
+  push: true
+  parse: trivy
+  input: trivy-operator reports pushed to k8s-log-router /v1/trivy (operator.webhookBroadcastURL, bearer token PUSH_TOKEN_TRIVY)
+gatekeeper:
+  lane: gatekeeper
+  service: true
+  namespaces: [gatekeeper-system]
+  input: OPA Gatekeeper logs (--log-denies) from pods labelled samma.io/detection=gatekeeper, through k8s-log-router
+openappsec:
+  lane: openappsec
+  service: true
+  namespaces: [open-appsec]
+  input: open-appsec agent security logs (JSON stdout) from pods labelled samma.io/detection=openappsec, through k8s-log-router
