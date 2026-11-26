@@ -16,11 +16,14 @@ siem/00-streams-job.yaml creates, so this chart and that Job agree.
 {{- $services := include "samma-siem.serviceLanes" . | fromJsonArray -}}
 {{- $svcSubjects := list -}}
 {{- if $services }}{{ $svcSubjects = list "samma.logs.svc.>" }}{{ end -}}
+{{- $auditSubjects := list -}}
+{{- if include "samma-siem.auditOn" . }}{{ $auditSubjects = list "samma.audit.k8s" }}{{ end -}}
 {{- $s := .Values.streams -}}
 {{- $streams := list
   (dict "name" "SIEM_RAW" "subjects" $raw "retention" "limits" "spec" $s.raw "bytes" (include "samma-siem.bytes" $s.raw.maxBytes))
   (dict "name" "SIEM_LOGS" "subjects" $logs "retention" "limits" "spec" $s.logs "bytes" (include "samma-siem.logsMaxBytes" .))
   (dict "name" "SIEM_SERVICES" "subjects" $svcSubjects "retention" "limits" "spec" $s.services "bytes" (include "samma-siem.bytes" $s.services.maxBytes))
+  (dict "name" "SIEM_AUDIT" "subjects" $auditSubjects "retention" "limits" "spec" $s.audit "bytes" (include "samma-siem.bytes" $s.audit.maxBytes))
   (dict "name" "SIEM_ALERTS" "subjects" (list "samma.alerts.>") "retention" "limits" "spec" $s.alerts "bytes" (include "samma-siem.bytes" $s.alerts.maxBytes))
   (dict "name" "INGESTER_SLICES" "subjects" (list "samma.ingester.slices.>") "retention" "workqueue" "spec" $s.ingesterSlices "bytes" (include "samma-siem.bytes" $s.ingesterSlices.maxBytes))
 -}}
@@ -77,6 +80,9 @@ h or d.
 {{- end -}}
 {{- range $services -}}
 {{- $consumers = append $consumers (dict "stream" "SIEM_SERVICES" "name" (printf "detection-engine-%s" .name) "filter" (printf "samma.logs.svc.%s" .name) "ackWait" $c.ackWait.detectionEngine) -}}
+{{- end -}}
+{{- if $auditSubjects -}}
+{{- $consumers = append $consumers (dict "stream" "SIEM_AUDIT" "name" "detection-engine-k8s" "filter" "samma.audit.k8s" "ackWait" $c.ackWait.detectionEngine) -}}
 {{- end -}}
 {{- range include "samma-siem.vectorQuickwitLanes" . | fromJsonArray -}}
 {{- $consumers = append $consumers (dict "stream" "SIEM_LOGS" "name" (printf "vector-quickwit-%s" .) "filter" (printf "samma.logs.%s" .) "ackWait" $c.ackWait.vectorQuickwitLogs) -}}

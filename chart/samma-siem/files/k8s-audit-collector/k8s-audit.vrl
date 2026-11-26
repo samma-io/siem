@@ -1,0 +1,114 @@
+# One audit.k8s.io/v1 Event line in, one SIEM record out, or nothing.
+#
+# The API server writes every request, several MiB a minute even on a small
+# cluster. Almost all of it is controllers reading and renewing their own
+# state. This keeps what a detection rule can use, well under 1% of the bytes:
+#
+# Always kept: 401 and 403 responses, and anything by system:anonymous.
+# Dropped:
+#   - stages other than ResponseComplete and Panic (one record per request)
+#   - nodes and control-plane components (system:node:*, system:kube-*,
+#     system:apiserver)
+#   - leases, access reviews, token reviews, and event writes (event deletes
+#     are kept)
+#   - status subresource writes
+#   - watch, and get/list except on secrets and on pods/exec, attach,
+#     portforward, log and serviceaccounts/token
+#   - ConfigMap writes by service accounts outside kube-system (leader
+#     election and operator state; coredns in kube-system is kept)
+#   - the noisy list below: controllers rewriting their own resources
+#
+# Out: the audit event unchanged at the top level (kind, verb, user,
+# objectRef, responseStatus, ...) minus responseObject, and minus
+# requestObject except for pods, services and RBAC objects (never a Secret
+# or ConfigMap body), plus:
+#   source       "k8s" (the detection-engine lane)
+#   feed         "audit"
+#   event_time   requestReceivedTimestamp, UTC, millisecond precision
+#   search_text  "<verb> <resource>[/<subresource>] <namespace>/<name> by <user> -> <code>"
+
+# service-account prefix => resources it rewrites all day.
+noisy = {
+  "system:serviceaccount:argocd:": ["applications", "applicationsets", "appprojects"],
+  "system:serviceaccount:arc-systems:": ["ephemeralrunnersets", "ephemeralrunners", "autoscalingrunnersets", "autoscalinglisteners"]
+}
+
+parsed, err = parse_json(string(.message) ?? "")
+if err != null || !is_object(parsed) {
+  abort
+}
+e = object!(parsed)
+kind = string(e.kind) ?? ""
+if kind != "Event" {
+  abort
+}
+
+stage = string(e.stage) ?? ""
+verb = string(e.verb) ?? ""
+user = string(e.user.username) ?? ""
+o = object(e.objectRef) ?? {}
+res = string(o.resource) ?? ""
+sub = string(o.subresource) ?? ""
+ns = string(o.namespace) ?? ""
+code = int(e.responseStatus.code) ?? 0
+
+if stage != "ResponseComplete" && stage != "Panic" {
+  abort
+}
+
+keep = code == 401 || code == 403 || user == "system:anonymous"
+if !keep {
+  if starts_with(user, "system:node:") || starts_with(user, "system:kube-") || user == "system:apiserver" {
+    abort
+  }
+  if includes(["leases", "selfsubjectrulesreviews", "selfsubjectaccessreviews", "subjectaccessreviews", "localsubjectaccessreviews", "tokenreviews"], res) {
+    abort
+  }
+  if res == "events" && verb != "delete" && verb != "deletecollection" {
+    abort
+  }
+  if sub == "status" {
+    abort
+  }
+  if verb == "watch" {
+    abort
+  }
+  sensitive = res == "secrets" ||
+    (res == "pods" && includes(["exec", "attach", "portforward", "log"], sub)) ||
+    (res == "serviceaccounts" && sub == "token")
+  if (verb == "get" || verb == "list") && !sensitive {
+    abort
+  }
+  if res == "configmaps" && ns != "kube-system" && starts_with(user, "system:serviceaccount:") && verb != "delete" {
+    abort
+  }
+  is_noisy = false
+  for_each(noisy) -> |prefix, resources| {
+    if starts_with(user, prefix) && includes(resources, res) {
+      is_noisy = true
+    }
+  }
+  if is_noisy {
+    abort
+  }
+}
+
+del(e.responseObject)
+if !includes(["pods", "services", "roles", "clusterroles", "rolebindings", "clusterrolebindings"], res) {
+  del(e.requestObject)
+}
+
+. = e
+t = parse_timestamp(string(e.requestReceivedTimestamp) ?? "", "%+") ?? now()
+path = res
+if sub != "" {
+  path = res + "/" + sub
+}
+target = string(o.name) ?? ""
+if ns != "" {
+  target = ns + "/" + target
+}
+.source = "k8s"
+.feed = "audit"
+.event_time = format_timestamp!(t, "%Y-%m-%dT%H:%M:%S%.3fZ", timezone: "UTC")
+.search_text = truncate(verb + " " + path + " " + target + " by " + user + " -> " + to_string(code), 2000)

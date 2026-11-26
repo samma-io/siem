@@ -18,10 +18,15 @@ S3:      {{ .Values.s3.endpoint }}, bucket {{ .Values.s3.bucket }}
 Detections (detections.<name>.enabled), and what feeds each:
 {{- range $dets }}
   {{ .name }}: {{ .input }}
-{{- if and (not .ingester) (not .gateway) (not .service) }}
+{{- if and (not .ingester) (not .gateway) (not .service) (not (and .audit (include "samma-siem.auditOn" $))) }}
          -> not deployed by this chart: publish to samma.logs.{{ .lane }} on {{ include "samma-siem.natsUrl" $ }}
 {{- end }}
-{{- if .service }}
+{{- if and .audit (include "samma-siem.auditOn" $) }}
+         -> {{ include "samma-siem.workloadName" (dict "root" $ "suffix" "k8s-audit-collector") }} on control-plane nodes reads {{ $.Values.auditCollector.logDir }}/{{ $.Values.auditCollector.logFile }}
+{{- end }}
+{{- if .push }}
+         -> the tool POSTs to {{ include "samma-siem.workloadName" (dict "root" $ "suffix" "k8s-log-router") }}:8080/v1/{{ .lane }} with Authorization: Bearer <PUSH_TOKEN_{{ upper .lane }} from {{ $.Values.logRouter.push.existingSecret | default "logRouter.push.existingSecret" }}>
+{{- else if .service }}
          -> point a node shipper at {{ include "samma-siem.workloadName" (dict "root" $ "suffix" "k8s-log-router") }}:24224 (Fluent forward) or :6000 (Vector);
             label pods samma.io/detection={{ .lane }} in {{ join ", " .namespaces }}
 {{- end }}

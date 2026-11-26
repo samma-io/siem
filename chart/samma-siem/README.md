@@ -83,16 +83,20 @@ osqueryGateway:
 | `cloudflare` | `cloudflare`, `SIEM_RAW` + `SIEM_LOGS` | ingester `cloudflare`, engine | Cloudflare APIs. Not detected yet, as `slack` |
 | `osquery` | `osquery`, `SIEM_LOGS` | osquery gateway (mutual TLS), engine | osquery-client hosts ([samma-io/osquery-client](https://github.com/samma-io/osquery-client)) |
 | `wazuh` | `wazuh`, `SIEM_LOGS` | engine | a Wazuh manager publishing `samma.logs.wazuh` (samma-io/wazuh-kubernetes collector) |
-| `k8s` | `k8s`, `SIEM_LOGS` | engine | API server audit events on `samma.logs.k8s`. Needs a 4Gi JetStream PVC (`streams.logs.laneMaxBytes.k8s`) |
+| `k8s` | `k8s`, `SIEM_AUDIT` | k8s-audit-collector (control-plane DaemonSet), engine | the API server audit log, filtered on the node to what rules use (see "API server audit") |
 | `scanner` | `scanner`, `SIEM_LOGS` | engine | Samma scanner findings on `samma.logs.scanner` |
 | `traefik` | `traefik`, `SIEM_SERVICES` | k8s-log-router, engine | Traefik JSON access log from labelled pods, through a node shipper (see "Service lanes") |
 | `keycloak` | `keycloak`, `SIEM_SERVICES` | k8s-log-router, engine | Keycloak user events (`org.keycloak.events`) from labelled pods; every other Keycloak log line is dropped by the router |
+| `falco` | `falco`, `SIEM_SERVICES` | k8s-log-router, engine | Falco JSON alerts (`json_output: true`) from labelled Falco pods |
+| `gatekeeper` | `gatekeeper`, `SIEM_SERVICES` | k8s-log-router, engine | OPA Gatekeeper logs with `--log-denies` from labelled pods |
+| `openappsec` | `openappsec`, `SIEM_SERVICES` | k8s-log-router, engine | open-appsec agent security logs (JSON stdout) from labelled pods |
+| `trivy` | `trivy`, `SIEM_SERVICES` | k8s-log-router push endpoint, engine | trivy-operator reports pushed over HTTP (see "Push lanes"); needs `logRouter.push.existingSecret` |
 
 - The catalog is `files/detections.yaml`. An unknown name is refused, and so is a
   SIEM with no detection at all.
 - After install, `NOTES` lists every enabled detection and what still has to feed
   it: the router and gateway addresses, and the subject for the inputs this chart
-  does not run (`wazuh`, `k8s`, `scanner`).
+  does not run (`wazuh`, `scanner`).
 - **osquery gateway.** It needs `osqueryGateway.existingSecret`. Its Service is
   ClusterIP unless you set `osqueryGateway.service.type` to `NodePort` (with
   `nodePort`) or `LoadBalancer`, which hosts outside the cluster need. The config in
@@ -228,11 +232,65 @@ Each entry gives:
   failed events only, unless the container sets
   `KC_SPI_EVENTS_LISTENER_JBOSS_LOGGING_SUCCESS_LEVEL=info`.
 - **The engine image** must know the lane: `traefik` needs detection-engine `5a4e082`
-  or later, `keycloak` an image with samma-io/detection-engine#32. A name in both
+  or later, `keycloak` an image with samma-io/detection-engine#32, `falco`, `trivy`,
+  `gatekeeper` and `openappsec` one with #34, and the `k8s` exec/secret tuning #33.
+  A name in both
   `lanes` and `serviceLanes` is refused.
 
 The guide `samma-io/guide` `10-kubernetes-service-logs` walks through Traefik end
 to end.
+
+## Push lanes
+
+Some tools send findings instead of logging them. A push lane takes them over HTTP
+on the log router's port `8080`:
+
+```
+tool ──POST /v1/<lane>, Authorization: Bearer <token>──► <release>-k8s-log-router:8080
+  → samma.logs.svc.<lane> (SIEM_SERVICES) → <release>-detection-engine-<lane>
+```
+
+- `detections.trivy` is one; `serviceLanes` takes others as `{name, push: true}`
+  (parser `json` or `trivy`).
+- **Tokens.** `logRouter.push.existingSecret` names a Secret, created by hand, with
+  `PUSH_TOKEN_<LANE>` (upper case, `-` as `_`) per lane. A lane without a token
+  answers 401, and so does a wrong token. The chart refuses a push lane without
+  the Secret.
+- **trivy-operator:** set `operator.webhookBroadcastURL` to
+  `http://<release>-k8s-log-router.<namespace>.svc:8080/v1/trivy` and send the token
+  as an `Authorization: Bearer` header (`operator.webhookBroadcastCustomHeaders`).
+  The router's `trivy` parser keeps the report's kind, resource, image, summary
+  and up to 20 critical or high findings, and never a matched secret's text.
+
+## API server audit
+
+`detections.k8s` runs `<release>-k8s-audit-collector`, a DaemonSet on control-plane
+nodes (`auditCollector`), from [samma-io/k8s-log-router](https://github.com/samma-io/k8s-log-router)
+`audit/` (copied to `files/k8s-audit-collector/`):
+
+```
+<auditCollector.logDir>/<logFile> (hostPath, read-only)
+  → filter VRL → samma.audit.k8s (SIEM_AUDIT, 3d, 64 MiB)
+  → <release>-detection-engine-k8s → samma.alerts.k8s
+```
+
+- **The filter** keeps 401/403 responses, anonymous requests, writes and the
+  sensitive reads (secrets, `pods/exec`, `attach`, `portforward`, `log`,
+  `serviceaccounts/token`), and drops node and controller churn. On a small
+  cluster that is about 20 MB a day out of several GB. `responseObject` is never
+  forwarded, and `requestObject` only for pods, services and RBAC objects.
+- **Not `samma.logs.k8s`:** older Samma pipelines publish container logs there.
+  An explicit `lanes` entry `{name: k8s, raw: false}` still selects that older
+  path (an outside publisher on `samma.logs.k8s`, `SIEM_LOGS`, 4Gi PVC) instead
+  of the collector.
+- **The node.** It runs as uid 65534 (Talos writes the log as `nobody`, 0600),
+  with no Kubernetes API access and no service account token. On kubeadm set
+  `auditCollector.logDir` and `logFile` from `--audit-log-path`. The API server
+  must have an audit policy; Metadata level is enough for every rule except the
+  `requestObject` ones (privileged pod, NodePort).
+- **Restarts.** Its checkpoint is an emptyDir and it starts at the end of the
+  file, so a restart never replays old events; events written while it is down
+  are missed.
 
 ## Streams and consumers
 
@@ -625,6 +683,11 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | `detections.<name>.enabled` | `workspace` on, the rest off | Detections to deploy, see "Detections" |
 | `detections.traefik.namespaces` | `[traefik]` | Namespaces allowed to feed the Traefik lane |
 | `detections.keycloak.namespaces` | `[keycloak]` | Namespaces allowed to feed the Keycloak lane |
+| `detections.{falco,gatekeeper,openappsec}.namespaces` | `[falco]`, `[gatekeeper-system]`, `[open-appsec]` | Namespaces allowed to feed each security tool lane |
+| `logRouter.push.existingSecret` | `""` | Secret with `PUSH_TOKEN_<LANE>` per push lane; required with `detections.trivy` |
+| `auditCollector.logDir`, `.logFile` | `/var/log/audit/kube`, `kube-apiserver.log` | Where the API server writes its audit log (Talos default) |
+| `auditCollector.nodeSelector`, `.tolerations` | control-plane | Where the audit collector runs |
+| `streams.audit.maxAge`, `.maxBytes` | `3d`, `64MiB` | `SIEM_AUDIT` limits (with `detections.k8s`) |
 | `lanes` | `[]` | Advanced: lanes beyond the detections, see "Lanes" |
 | `serviceLanes` | `[]` | Advanced: `{name, namespaces}` per service lane beyond the detections, see "Service lanes" |
 | `osqueryGateway.existingSecret` | empty | TLS Secret of the osquery gateway, required with `detections.osquery` |

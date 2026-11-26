@@ -16,10 +16,12 @@
 # where this chart can run it, the input (an ingester source, the osquery
 # gateway, the k8s log router). files/detections.yaml is the catalog; the
 # README, "Detections", lists what each one needs. Inputs this chart cannot
-# run (wazuh, k8s, scanner) are listed in NOTES after install.
+# run (wazuh, scanner) are listed in NOTES after install.
 #
-# traefik, keycloak (and any service detection) take namespaces: the
-# namespaces whose pods may feed it. osquery needs osqueryGateway.existingSecret.
+# traefik, keycloak, falco, gatekeeper, openappsec (and any service detection)
+# take namespaces: the namespaces whose pods may feed it. trivy is a push lane
+# and needs logRouter.push.existingSecret. k8s runs auditCollector on
+# control-plane nodes. osquery needs osqueryGateway.existingSecret.
 detections:
   workspace: {enabled: true}
   slack: {enabled: false}
@@ -31,6 +33,10 @@ detections:
   scanner: {enabled: false}
   traefik: {enabled: false, namespaces: [traefik]}
   keycloak: {enabled: false, namespaces: [keycloak]}
+  falco: {enabled: false, namespaces: [falco]}
+  trivy: {enabled: false}
+  gatekeeper: {enabled: false, namespaces: [gatekeeper-system]}
+  openappsec: {enabled: false, namespaces: [open-appsec]}
 
 # Advanced: lanes captured by the streams beyond the ones detections enable
 # (README, "Lanes"). Normally empty. Never a wildcard: the legacy pipeline
@@ -39,6 +45,8 @@ detections:
 #
 # An entry is a lane name, or {name, raw} where raw: false leaves the lane
 # out of SIEM_RAW (no samma.raw.<lane>, no vector-<lane> consumer).
+# {name: k8s, raw: false} here takes k8s audit events published by something
+# else to samma.logs.k8s, and replaces detections.k8s's audit collector.
 #   - {name: k8s, raw: false}
 lanes: []
 
@@ -49,7 +57,8 @@ lanes: []
 # SIEM_SERVICES) and gets its own detection-engine-<name>. Any other label
 # value or namespace is dropped, so a label cannot write into another lane.
 # parse is the router's parser: json (default) or keycloak (keeps only
-# org.keycloak.events lines). The detection engine image must know the lane
+# org.keycloak.events lines). push: true makes a push lane (the tool POSTs to
+# the router's :8080/v1/<name>; no namespaces; parse json or trivy). The detection engine image must know the lane
 # (traefik: 5a4e082 or later; keycloak: samma-io/detection-engine#32).
 # Node shippers (fluent-bit, a Vector agent) are not part of this chart; point
 # them at the logRouter Service (README, "Service lanes").
@@ -238,6 +247,13 @@ streams:
   services:
     maxAge: 24h
     maxBytes: 100MiB
+    duplicateWindow: 2m
+  # SIEM_AUDIT: samma.audit.k8s, API server audit events filtered by
+  # auditCollector (created only with detections.k8s). About 20 MB a day on
+  # a small cluster. Not stored by siem-storage: detection only.
+  audit:
+    maxAge: 3d
+    maxBytes: 64MiB
     duplicateWindow: 2m
   # INGESTER_SLICES: samma.ingester.slices.>, a work queue (a message is
   # gone once acked). Retention cannot be changed after creation.
@@ -502,6 +518,37 @@ logRouter:
   digest: ""
   pullPolicy: IfNotPresent
   replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Push lanes (detections.trivy, serviceLanes with push: true): a Secret
+  # (created by hand) with PUSH_TOKEN_<LANE> for each, e.g. PUSH_TOKEN_TRIVY.
+  # The router answers 401 for a lane without a token.
+  push:
+    existingSecret: ""
+
+# k8s-audit-collector (samma-io/k8s-log-router audit/): rendered with
+# detections.k8s. A DaemonSet on control-plane nodes that tails the API
+# server audit log, keeps what detection rules use (well under 1% of it) and
+# publishes to samma.audit.k8s (SIEM_AUDIT). Runs as 65534 because Talos
+# writes the log as nobody, mode 0600; mounts logDir read-only.
+# kubeadm: logDir and logFile from --audit-log-path.
+auditCollector:
+  image: timberio/vector
+  tag: 0.53.0-distroless-libc
+  digest: ""
+  pullPolicy: IfNotPresent
+  runAsUser: 65534
+  logDir: /var/log/audit/kube
+  logFile: kube-apiserver.log
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+    - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+    - {key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule}
   resources:
     requests:
       cpu: 50m

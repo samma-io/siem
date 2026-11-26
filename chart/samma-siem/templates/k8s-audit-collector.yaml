@@ -1,0 +1,116 @@
+{{- if include "samma-siem.auditOn" . }}
+{{- /*
+k8s-audit-collector (samma-io/k8s-log-router audit/): the API server audit log
+on control-plane nodes -> filter VRL -> samma.audit.k8s (SIEM_AUDIT) ->
+detection-engine-k8s. files/k8s-audit-collector/ is a verbatim copy of that
+repo's audit/. Rendered with detections.k8s.
+*/ -}}
+{{- $v := .Values.auditCollector -}}
+{{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "k8s-audit-collector") -}}
+{{- $cfg := printf "%s%s" (.Files.Get "files/k8s-audit-collector/vector.yaml") (.Files.Get "files/k8s-audit-collector/k8s-audit.vrl") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: k8s-audit-collector
+data:
+  vector.yaml: |
+    {{- .Files.Get "files/k8s-audit-collector/vector.yaml" | nindent 4 }}
+  k8s-audit.vrl: |
+    {{- .Files.Get "files/k8s-audit-collector/k8s-audit.vrl" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: k8s-audit-collector
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "k8s-audit-collector") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: k8s-audit-collector
+      annotations:
+        checksum/config: {{ $cfg | sha256sum }}
+        {{- with .Values.workloads.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      # Not workloads.nodeSelector: this runs where the API server writes its
+      # audit log, on control-plane nodes, whatever their architecture.
+      automountServiceAccountToken: false
+      {{- with .Values.workloads.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ if kindIs "map" . }}{{ .name }}{{ else }}{{ . }}{{ end }}
+        {{- end }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml $v.nodeSelector | nindent 8 }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "samma-siem.podSecurity" (dict "runAsUser" $v.runAsUser) | nindent 8 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vector
+          image: {{ include "samma-siem.workloadImage" (dict "name" "auditCollector" "values" $v) }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          args: ["--config", "/etc/k8s-audit-collector/vector.yaml"]
+          env:
+            - name: NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            - name: AUDIT_LOG
+              value: {{ printf "%s/%s" (trimSuffix "/" $v.logDir) $v.logFile | quote }}
+            - name: VRL_DIR
+              value: /etc/k8s-audit-collector
+          ports:
+            - name: vector-api
+              containerPort: 8686
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: vector-api
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: vector-api
+            periodSeconds: 10
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/k8s-audit-collector
+              readOnly: true
+            - name: audit
+              mountPath: {{ $v.logDir }}
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/vector
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: audit
+          hostPath:
+            path: {{ $v.logDir }}
+            type: Directory
+        - name: data
+          emptyDir: {}
+{{- end }}

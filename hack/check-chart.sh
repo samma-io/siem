@@ -561,4 +561,47 @@ grep -qF 'if parser == "keycloak"' <<<"$(doc ci-samma-siem-k8s-log-router Config
 render --set-json 'serviceLanes=[{"name":"vault","namespaces":["vault"],"parse":"xml"}]' >/dev/null 2>&1 \
   && fail "an unknown parser rendered"
 
+echo "== security tool detections: falco, gatekeeper, openappsec log lanes; trivy push lane"
+render --set detections.trivy.enabled=true >/dev/null 2>&1 && fail "trivy rendered without logRouter.push.existingSecret"
+out=$(render --set detections.falco.enabled=true --set detections.gatekeeper.enabled=true --set detections.openappsec.enabled=true \
+  --set detections.trivy.enabled=true --set logRouter.push.existingSecret=router-push)
+cm=$(doc ci-samma-siem-k8s-log-router ConfigMap)
+grep -qF 'lanes = {"falco":{"namespaces":["falco"],"parse":"json"},"gatekeeper":{"namespaces":["gatekeeper-system"],"parse":"json"},"openappsec":{"namespaces":["open-appsec"],"parse":"json"}}' <<<"$cm" \
+  || fail "security tool allowlist: $(grep 'lanes = ' <<<"$cm")"
+grep -qF 'push_parsers = {"trivy":"trivy"}' <<<"$cm" || fail "push_parsers: $(grep 'push_parsers = ' <<<"$cm")"
+grep -qF 'strategy: custom' <<<"$cm" || fail "router vector.yaml has no push auth"
+router=$(doc ci-samma-siem-k8s-log-router Deployment)
+grep -qF 'name: router-push' <<<"$router" || fail "router does not read the push Secret"
+grep -qF 'containerPort: 8080' <<<"$router" || fail "router has no push port"
+grep -qF 'port: 8080' <<<"$(doc ci-samma-siem-k8s-log-router Service)" || fail "router Service has no push port"
+for l in falco trivy gatekeeper openappsec; do
+  check_workload "ci-samma-siem-detection-engine-$l" "value: \"samma.logs.svc.$l\"" 'value: SIEM_SERVICES'
+  consumers | grep -qx "SIEM_SERVICES.detection-engine-$l" || fail "no SIEM_SERVICES.detection-engine-$l"
+done
+render --set-json 'serviceLanes=[{"name":"x","push":true,"parse":"keycloak"}]' --set logRouter.push.existingSecret=s >/dev/null 2>&1 \
+  && fail "a push lane with the keycloak log parser rendered"
+out=$(render --set-json 'serviceLanes=[{"name":"falco-push","push":true}]' --set logRouter.push.existingSecret=s)
+grep -qF 'push_parsers = {"falco-push":"json"}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "serviceLanes push entry"
+grep -qF 'lanes = {}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "a push lane is in the log allowlist"
+
+echo "== k8s detection: audit collector, SIEM_AUDIT, engine on samma.audit.k8s"
+out=$(render --set detections.k8s.enabled=true)
+ds=$(doc ci-samma-siem-k8s-audit-collector DaemonSet)
+[ -n "$ds" ] || fail "no k8s-audit-collector DaemonSet"
+for want in 'node-role.kubernetes.io/control-plane: ""' 'runAsUser: 65534' 'value: "/var/log/audit/kube/kube-apiserver.log"' \
+  'path: /var/log/audit/kube' 'readOnly: true' 'automountServiceAccountToken: false' 'readOnlyRootFilesystem: true'; do
+  grep -qF -- "$want" <<<"$ds" || fail "k8s-audit-collector lacks: $want"
+done
+grep -qF 'kubernetes.io/arch' <<<"$ds" && fail "k8s-audit-collector inherits workloads.nodeSelector"
+grep -qF 'subject: samma.audit.k8s' <<<"$(doc ci-samma-siem-k8s-audit-collector ConfigMap)" || fail "collector config subject"
+grep -qF '"subjects": ["samma.audit.k8s"],' <<<"$(stream SIEM_AUDIT)" || fail "SIEM_AUDIT subjects"
+grep -qF '"max_bytes": 67108864,' <<<"$(stream SIEM_AUDIT)" || fail "SIEM_AUDIT max_bytes"
+consumers | grep -qx 'SIEM_AUDIT.detection-engine-k8s' || fail "no SIEM_AUDIT.detection-engine-k8s"
+check_workload ci-samma-siem-detection-engine-k8s 'value: SIEM_AUDIT' 'value: "samma.audit.k8s"'
+grep -qF 'samma.logs.k8s"' <<<"$(stream SIEM_LOGS)" && fail "detections.k8s still captures samma.logs.k8s in SIEM_LOGS"
+out=$(render --set detections.k8s.enabled=true --set-json 'lanes=[{"name":"k8s","raw":false}]' --set nats.config.jetstream.fileStore.pvc.size=4Gi)
+[ -z "$(doc ci-samma-siem-k8s-audit-collector DaemonSet)" ] || fail "lanes k8s did not replace the audit collector"
+grep -qF 'stream.SIEM_AUDIT.json' <<<"$out" && fail "lanes k8s still creates SIEM_AUDIT"
+true
+
 echo "chart render checks passed"

@@ -139,7 +139,7 @@ a lowercase name (lane-names.md); a plain string has raw: true.
 {{- $out := list -}}
 {{- $seen := dict -}}
 {{- range include "samma-siem.detections" . | fromJsonArray -}}
-{{- if not .service -}}
+{{- if not (or .service .audit) -}}
 {{- $_ := set $seen .lane true -}}
 {{- $out = append $out (dict "name" .lane "raw" .raw) -}}
 {{- end -}}
@@ -195,6 +195,26 @@ as a JSON list in catalog order. An unknown name is refused.
 {{- end -}}
 
 {{- /*
+samma-siem.auditOn: "true" when detections.k8s is enabled and lanes does not
+list k8s (an explicit lanes entry keeps the older SIEM_LOGS path, fed from
+outside the chart). The chart then runs k8s-audit-collector, the SIEM_AUDIT
+stream and detection-engine-k8s on samma.audit.k8s.
+*/ -}}
+{{- define "samma-siem.auditOn" -}}
+{{- $explicit := false -}}
+{{- range .Values.lanes | default list -}}
+{{- $n := "" -}}
+{{- if kindIs "map" . }}{{ $n = toString (.name | default "") }}{{ else }}{{ $n = toString . }}{{ end -}}
+{{- if eq $n "k8s" }}{{ $explicit = true }}{{ end -}}
+{{- end -}}
+{{- if not $explicit -}}
+{{- range include "samma-siem.detections" . | fromJsonArray -}}
+{{- if .audit }}true{{ end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
 samma-siem.storageOn: "true" when siem-storage runs: storage.enabled and at
 least one lane in SIEM_LOGS (service lanes are not stored).
 */ -}}
@@ -237,7 +257,7 @@ validated. A name is also a lane name, so it may not be in lanes too.
 {{- range include "samma-siem.lanes" . | fromJsonArray }}{{ $lanes = append $lanes .name }}{{ end -}}
 {{- $entries := list -}}
 {{- range include "samma-siem.detections" . | fromJsonArray -}}
-{{- if .service }}{{ $entries = append $entries (dict "name" .lane "namespaces" .namespaces "parse" (.parse | default "json")) }}{{ end -}}
+{{- if .service }}{{ $entries = append $entries (dict "name" .lane "namespaces" (.namespaces | default list) "parse" (.parse | default "json") "push" (.push | default false)) }}{{ end -}}
 {{- end -}}
 {{- range .Values.serviceLanes | default list }}{{ $entries = append $entries . }}{{ end -}}
 {{- range $entries -}}
@@ -249,21 +269,24 @@ validated. A name is also a lane name, so it may not be in lanes too.
 {{- if hasKey $seen $name }}{{ fail (printf "serviceLanes %q is listed twice (also check detections.%s)" $name $name) }}{{ end -}}
 {{- $_ := set $seen $name true -}}
 {{- if has $name $lanes }}{{ fail (printf "serviceLanes %q is also in lanes: one engine per lane name" $name) }}{{ end -}}
+{{- $push := .push | default false -}}
 {{- $ns := .namespaces | default list -}}
-{{- if not $ns }}{{ fail (printf "serviceLanes %q needs namespaces: the namespaces whose pods may feed it" $name) }}{{ end -}}
+{{- if and (not $push) (not $ns) }}{{ fail (printf "serviceLanes %q needs namespaces: the namespaces whose pods may feed it" $name) }}{{ end -}}
 {{- range $ns -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .)) }}{{ fail (printf "serviceLanes %q: namespace %q is not a namespace name" $name (toString .)) }}{{ end -}}
 {{- end -}}
 {{- $parse := toString (.parse | default "json") -}}
-{{- if not (has $parse (list "json" "keycloak")) }}{{ fail (printf "serviceLanes %q: parse %q is not a k8s-log-router parser; one of json, keycloak" $name $parse) }}{{ end -}}
-{{- $out = append $out (dict "name" $name "namespaces" $ns "parse" $parse) -}}
+{{- $parsers := ternary (list "json" "trivy") (list "json" "keycloak") $push -}}
+{{- if not (has $parse $parsers) }}{{ fail (printf "serviceLanes %q: parse %q is not a k8s-log-router %s parser; one of %s" $name $parse (ternary "push" "log" $push) (join ", " $parsers)) }}{{ end -}}
+{{- $out = append $out (dict "name" $name "namespaces" $ns "parse" $parse "push" $push) -}}
 {{- end -}}
 {{- toJson $out -}}
 {{- end -}}
 
 {{- /*
 samma-siem.engines: every detection engine, {name, stream, subject}: one per
-lane on SIEM_LOGS and one per service lane on SIEM_SERVICES.
+lane on SIEM_LOGS, one per service lane on SIEM_SERVICES and, with the audit
+collector, k8s on SIEM_AUDIT.
 */ -}}
 {{- define "samma-siem.engines" -}}
 {{- $out := list -}}
@@ -272,6 +295,9 @@ lane on SIEM_LOGS and one per service lane on SIEM_SERVICES.
 {{- end -}}
 {{- range include "samma-siem.serviceLanes" . | fromJsonArray -}}
 {{- $out = append $out (dict "name" .name "stream" "SIEM_SERVICES" "subject" (printf "samma.logs.svc.%s" .name)) -}}
+{{- end -}}
+{{- if include "samma-siem.auditOn" . -}}
+{{- $out = append $out (dict "name" "k8s" "stream" "SIEM_AUDIT" "subject" "samma.audit.k8s") -}}
 {{- end -}}
 {{- if not $out }}{{ fail "enable at least one detection (detections.<name>.enabled), or list a lane in lanes or serviceLanes" }}{{ end -}}
 {{- toJson $out -}}
