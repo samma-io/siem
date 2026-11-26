@@ -147,6 +147,24 @@ docker build -t sammascanner/siem:latest .
 `chart/samma-siem` is the chart of the Kubernetes SIEM (the NATS transport of
 `samma-io/aws-siem`). It installs NATS JetStream, the streams and consumers, and
 an optional MinIO; see [`chart/samma-siem/README.md`](chart/samma-siem/README.md).
+
+You choose what to detect, and the chart deploys each lane with its engine and,
+where it can run it, its input:
+
+```yaml
+detections:
+  workspace: {enabled: true}                       # Google Workspace ingester
+  traefik: {enabled: true, namespaces: [traefik]}  # k8s-log-router + labelled pods
+  osquery: {enabled: true}                         # osquery gateway (mutual TLS)
+  wazuh: {enabled: true}                           # a Wazuh manager publishes to it
+osqueryGateway:
+  existingSecret: osquery-gateway-tls
+```
+
+The detections are `workspace`, `slack`, `onepassword`, `cloudflare`, `osquery`,
+`wazuh`, `k8s`, `scanner` and `traefik`; the chart README, "Detections", says what
+each one deploys and what you connect. The walkthrough is in
+[samma-io/guide](https://github.com/samma-io/guide), chapters 8 and 10.
 Detection runs in [samma-io/detection-engine](https://github.com/samma-io/detection-engine),
 not in the legacy engine above.
 
