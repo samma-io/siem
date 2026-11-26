@@ -518,7 +518,7 @@ for l in traefik vault; do
 done
 check_workload ci-samma-siem-k8s-log-router 'image: timberio/vector:0.53.0-distroless-libc' 'containerPort: 24224' \
   'containerPort: 6000' 'automountServiceAccountToken: false' 'checksum/config:'
-grep -qF 'lanes = {"traefik":["traefik"],"vault":["vault","vault-system"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" \
+grep -qF 'lanes = {"traefik":{"namespaces":["traefik"],"parse":"json"},"vault":{"namespaces":["vault","vault-system"],"parse":"json"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" \
   || fail "the router allowlist is not serviceLanes"
 grep -qE 'hostPath|serviceAccountName' <<<"$(doc ci-samma-siem-k8s-log-router Deployment)" && fail "the router has host mounts or an API identity"
 render --set-json 'serviceLanes=[{"name":"traefik"}]' >/dev/null 2>&1 && fail "a service lane rendered without namespaces"
@@ -532,9 +532,9 @@ out=$(render --set detections.workspace.enabled=false --set detections.traefik.e
   || fail "traefik only: $(deployments | tr '\n' ' ')"
 grep -qF 'stream.SIEM_LOGS.json' <<<"$out" && fail "traefik only still creates SIEM_LOGS"
 grep -qF 'storage-logs' <<<"$out" && fail "traefik only still creates storage-logs"
-grep -qF 'lanes = {"traefik":["traefik"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "traefik detection allowlist"
+grep -qF 'lanes = {"traefik":{"namespaces":["traefik"],"parse":"json"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "traefik detection allowlist"
 out=$(render --set detections.traefik.enabled=true --set-json 'detections.traefik.namespaces=["edge","traefik"]')
-grep -qF 'lanes = {"traefik":["edge","traefik"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "detections.traefik.namespaces not used"
+grep -qF 'lanes = {"traefik":{"namespaces":["edge","traefik"],"parse":"json"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "detections.traefik.namespaces not used"
 osq=(--set detections.osquery.enabled=true --set osqueryGateway.existingSecret=osq-tls)
 out=$(render "${osq[@]}" --set detections.wazuh.enabled=true)
 grep -qF '"subjects": ["samma.logs.osquery","samma.logs.wazuh","samma.logs.workspace"],' <<<"$(stream SIEM_LOGS)" || fail "osquery + wazuh SIEM_LOGS subjects"
@@ -550,5 +550,15 @@ render --set detections.workspace.enabled=false >/dev/null 2>&1 && fail "a SIEM 
 render --set detections.slack.enabled=true | grep -qF 'name: ci-samma-siem-ingester-slack' || fail "detections.slack did not add its ingester"
 render --set detections.traefik.enabled=true --set-json 'serviceLanes=[{"name":"traefik","namespaces":["x"]}]' >/dev/null 2>&1 \
   && fail "traefik in both detections and serviceLanes rendered"
+
+echo "== keycloak detection: keycloak parser, own engine on SIEM_SERVICES"
+out=$(render --set detections.keycloak.enabled=true --set-json 'detections.keycloak.namespaces=["wazuh","code"]')
+grep -qF 'lanes = {"keycloak":{"namespaces":["wazuh","code"],"parse":"keycloak"}}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" \
+  || fail "keycloak allowlist: $(doc ci-samma-siem-k8s-log-router ConfigMap | grep 'lanes = ')"
+grep -qF 'ci-samma-siem-detection-engine-keycloak' <<<"$out" || fail "no detection-engine-keycloak"
+grep -qF 'samma.logs.svc.keycloak' <<<"$out" || fail "no samma.logs.svc.keycloak consumer"
+grep -qF 'if parser == "keycloak"' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "router VRL has no keycloak parser"
+render --set-json 'serviceLanes=[{"name":"vault","namespaces":["vault"],"parse":"xml"}]' >/dev/null 2>&1 \
+  && fail "an unknown parser rendered"
 
 echo "chart render checks passed"

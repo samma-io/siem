@@ -9,7 +9,7 @@ the chart only replaces the VRL's lanes object with serviceLanes.
 {{- $v := .Values.logRouter -}}
 {{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "k8s-log-router") -}}
 {{- $allow := dict -}}
-{{- range $services }}{{ $_ := set $allow .name .namespaces }}{{ end -}}
+{{- range $services }}{{ $_ := set $allow .name (dict "namespaces" .namespaces "parse" .parse) }}{{ end -}}
 {{- $vrl := .Files.Get "files/k8s-log-router/k8s-router.vrl" -}}
 {{- $lanesRe := "(?s)\nlanes = \\{.*?\n\\}\n" -}}
 {{- if not (regexMatch $lanesRe $vrl) }}{{ fail "files/k8s-log-router/k8s-router.vrl has no lanes = { ... } block to replace" }}{{ end -}}

@@ -86,6 +86,7 @@ osqueryGateway:
 | `k8s` | `k8s`, `SIEM_LOGS` | engine | API server audit events on `samma.logs.k8s`. Needs a 4Gi JetStream PVC (`streams.logs.laneMaxBytes.k8s`) |
 | `scanner` | `scanner`, `SIEM_LOGS` | engine | Samma scanner findings on `samma.logs.scanner` |
 | `traefik` | `traefik`, `SIEM_SERVICES` | k8s-log-router, engine | Traefik JSON access log from labelled pods, through a node shipper (see "Service lanes") |
+| `keycloak` | `keycloak`, `SIEM_SERVICES` | k8s-log-router, engine | Keycloak user events (`org.keycloak.events`) from labelled pods; every other Keycloak log line is dropped by the router |
 
 - The catalog is `files/detections.yaml`. An unknown name is refused, and so is a
   SIEM with no detection at all.
@@ -192,6 +193,7 @@ Each entry gives:
 | consumer on `SIEM_SERVICES` | `detection-engine-<lane>` |
 | Deployment and Service | `<release>-detection-engine-<lane>` |
 | allowlist entry in the router | `<lane>` from the listed namespaces only |
+| router parser | `parse`: `json` (default) or `keycloak` |
 
 - **The allowlist is the security boundary.** A label is only a request: a record
   whose lane is not listed, or whose pod runs in a namespace not listed for that
@@ -220,8 +222,14 @@ Each entry gives:
       Retry_Limit   5
   ```
 
+- **Parsers.** `json` keeps every line, a JSON line's fields at the top level.
+  `keycloak` keeps only `org.keycloak.events` lines and lifts their `key="value"`
+  pairs (`type`, `clientId`, `ipAddress`, `error`, ...) to fields. Keycloak logs
+  failed events only, unless the container sets
+  `KC_SPI_EVENTS_LISTENER_JBOSS_LOGGING_SUCCESS_LEVEL=info`.
 - **The engine image** must know the lane: `traefik` needs detection-engine `5a4e082`
-  or later. A name in both `lanes` and `serviceLanes` is refused.
+  or later, `keycloak` an image with samma-io/detection-engine#32. A name in both
+  `lanes` and `serviceLanes` is refused.
 
 The guide `samma-io/guide` `10-kubernetes-service-logs` walks through Traefik end
 to end.
@@ -616,6 +624,7 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 |---|---|---|
 | `detections.<name>.enabled` | `workspace` on, the rest off | Detections to deploy, see "Detections" |
 | `detections.traefik.namespaces` | `[traefik]` | Namespaces allowed to feed the Traefik lane |
+| `detections.keycloak.namespaces` | `[keycloak]` | Namespaces allowed to feed the Keycloak lane |
 | `lanes` | `[]` | Advanced: lanes beyond the detections, see "Lanes" |
 | `serviceLanes` | `[]` | Advanced: `{name, namespaces}` per service lane beyond the detections, see "Service lanes" |
 | `osqueryGateway.existingSecret` | empty | TLS Secret of the osquery gateway, required with `detections.osquery` |

@@ -237,7 +237,7 @@ validated. A name is also a lane name, so it may not be in lanes too.
 {{- range include "samma-siem.lanes" . | fromJsonArray }}{{ $lanes = append $lanes .name }}{{ end -}}
 {{- $entries := list -}}
 {{- range include "samma-siem.detections" . | fromJsonArray -}}
-{{- if .service }}{{ $entries = append $entries (dict "name" .lane "namespaces" .namespaces) }}{{ end -}}
+{{- if .service }}{{ $entries = append $entries (dict "name" .lane "namespaces" .namespaces "parse" (.parse | default "json")) }}{{ end -}}
 {{- end -}}
 {{- range .Values.serviceLanes | default list }}{{ $entries = append $entries . }}{{ end -}}
 {{- range $entries -}}
@@ -254,7 +254,9 @@ validated. A name is also a lane name, so it may not be in lanes too.
 {{- range $ns -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .)) }}{{ fail (printf "serviceLanes %q: namespace %q is not a namespace name" $name (toString .)) }}{{ end -}}
 {{- end -}}
-{{- $out = append $out (dict "name" $name "namespaces" $ns) -}}
+{{- $parse := toString (.parse | default "json") -}}
+{{- if not (has $parse (list "json" "keycloak")) }}{{ fail (printf "serviceLanes %q: parse %q is not a k8s-log-router parser; one of json, keycloak" $name $parse) }}{{ end -}}
+{{- $out = append $out (dict "name" $name "namespaces" $ns "parse" $parse) -}}
 {{- end -}}
 {{- toJson $out -}}
 {{- end -}}

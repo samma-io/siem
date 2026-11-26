@@ -6,7 +6,8 @@
 #              rules/<lane>/ in the detection-engine image
 #   raw        the lane has raw records in SIEM_RAW (normalised by Vector)
 #   service    a service lane (SIEM_SERVICES, k8s-log-router); namespaces is
-#              the default allowlist, overridable per detection
+#              the default allowlist, overridable per detection; parse is
+#              the router's parser for the lane (json when unset)
 #   ingester   the ingester source that feeds the lane
 #   gateway    a gateway this chart deploys for the lane
 #   input      where the records come from, for NOTES and the README
@@ -52,3 +53,9 @@ traefik:
   service: true
   namespaces: [traefik]
   input: Traefik JSON access log from pods labelled samma.io/detection=traefik, through k8s-log-router
+keycloak:
+  lane: keycloak
+  service: true
+  namespaces: [keycloak]
+  parse: keycloak
+  input: Keycloak user events (org.keycloak.events) from pods labelled samma.io/detection=keycloak, through k8s-log-router

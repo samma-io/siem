@@ -18,8 +18,8 @@
 # README, "Detections", lists what each one needs. Inputs this chart cannot
 # run (wazuh, k8s, scanner) are listed in NOTES after install.
 #
-# traefik (and any service detection) takes namespaces: the namespaces whose
-# pods may feed it. osquery needs osqueryGateway.existingSecret.
+# traefik, keycloak (and any service detection) take namespaces: the
+# namespaces whose pods may feed it. osquery needs osqueryGateway.existingSecret.
 detections:
   workspace: {enabled: true}
   slack: {enabled: false}
@@ -30,6 +30,7 @@ detections:
   k8s: {enabled: false}
   scanner: {enabled: false}
   traefik: {enabled: false, namespaces: [traefik]}
+  keycloak: {enabled: false, namespaces: [keycloak]}
 
 # Advanced: lanes captured by the streams beyond the ones detections enable
 # (README, "Lanes"). Normally empty. Never a wildcard: the legacy pipeline
@@ -47,10 +48,13 @@ lanes: []
 # for <name> is forwarded by the log router to samma.logs.svc.<name> (stream
 # SIEM_SERVICES) and gets its own detection-engine-<name>. Any other label
 # value or namespace is dropped, so a label cannot write into another lane.
-# The detection engine image must know the lane (traefik: 5a4e082 or later).
+# parse is the router's parser: json (default) or keycloak (keeps only
+# org.keycloak.events lines). The detection engine image must know the lane
+# (traefik: 5a4e082 or later; keycloak: samma-io/detection-engine#32).
 # Node shippers (fluent-bit, a Vector agent) are not part of this chart; point
 # them at the logRouter Service (README, "Service lanes").
 #   - {name: traefik, namespaces: [traefik]}
+#   - {name: keycloak, namespaces: [keycloak], parse: keycloak}
 serviceLanes: []
 
 # The ingester: SaaS audit-log puller (samma-io/ingester), one Deployment
