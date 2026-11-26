@@ -1,0 +1,41 @@
+# Environment: NATS_URL (required), VRL_DIR (default /etc/k8s-log-router).
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+# A shipper's batch is acked only once JetStream has stored it.
+acknowledgements:
+  enabled: true
+
+sources:
+  fluent_forward:
+    type: fluent
+    address: 0.0.0.0:24224
+  vector_agents:
+    type: vector
+    address: 0.0.0.0:6000
+
+transforms:
+  k8s_route:
+    type: remap
+    inputs: [fluent_forward, vector_agents]
+    file: ${VRL_DIR:-/etc/k8s-log-router}/k8s-router.vrl
+    drop_on_abort: true
+    drop_on_error: true
+
+sinks:
+  nats_svc:
+    type: nats
+    inputs: [k8s_route]
+    url: ${NATS_URL}
+    connection_name: k8s-log-router
+    # source is set by the VRL from the allowlist only, never from the log.
+    subject: "samma.logs.svc.{{ source }}"
+    jetstream: true
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 10000
+      when_full: block
+

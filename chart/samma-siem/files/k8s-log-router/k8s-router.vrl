@@ -1,0 +1,71 @@
+# One container log line in, one SIEM record out, or nothing.
+#
+# In: a fluent-bit record (kubernetes.labels, kubernetes.namespace_name,
+# kubernetes.host, .log, or the log's JSON fields merged by Merge_Log), or a
+# Vector kubernetes_logs event (kubernetes.pod_labels, pod_namespace,
+# pod_node_name, .message).
+#
+# Out: the application's own fields (a JSON log line is parsed and kept at the
+# top level, so Sigma rules match Traefik's RequestPath, DownstreamStatus, ...;
+# a plain line is kept as .message) plus the envelope, which is written last so
+# a log line cannot forge it:
+#   source       the lane, e.g. "traefik" (also the NATS subject suffix)
+#   feed         "k8s"
+#   event_time   the shipper's timestamp, UTC, millisecond precision
+#   k8s          {namespace, pod, container, node}
+#   search_text  the line, at most 2000 characters
+
+# lane => namespaces whose pods may feed it.
+lanes = {
+  "traefik": ["traefik"]
+}
+
+k = object(.kubernetes) ?? {}
+labels = object(k.labels) ?? object(k.pod_labels) ?? {}
+lane = string(labels."samma.io/detection") ?? ""
+ns = string(k.namespace_name) ?? string(k.pod_namespace) ?? ""
+allowed = array(get(lanes, [lane]) ?? []) ?? []
+if lane == "" || ns == "" || !includes(allowed, ns) {
+  abort
+}
+
+meta = {
+  "namespace": ns,
+  "pod": string(k.pod_name) ?? "",
+  "container": string(k.container_name) ?? "",
+  "node": string(k.host) ?? string(k.pod_node_name) ?? ""
+}
+t = timestamp(.timestamp) ?? now()
+raw = string(.log) ?? string(.message) ?? ""
+
+# Transport fields of fluent-bit and Vector; what remains is the application's.
+del(.kubernetes)
+del(.log)
+del(.message)
+del(.timestamp)
+del(.tag)
+del(.time)
+del(.stream)
+del(.source_type)
+del(.file)
+del(.host)
+del(.logtag)
+
+if raw != "" {
+  parsed, err = parse_json(raw)
+  if err == null && is_object(parsed) {
+    . = merge(., object!(parsed))
+  } else {
+    .message = raw
+  }
+}
+if raw == "" {
+  raw = encode_json(.)
+}
+
+.source = lane
+.feed = "k8s"
+.event_time = format_timestamp!(t, "%Y-%m-%dT%H:%M:%S%.3fZ", timezone: "UTC")
+.k8s = meta
+.search_text = truncate(raw, 2000)
+

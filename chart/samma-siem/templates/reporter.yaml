@@ -19,7 +19,7 @@ pod keeps automountServiceAccountToken: false like every other workload.
 {{- if lt (int $v.intervalSeconds) 60 }}{{ fail "reporter.intervalSeconds must be at least 60" }}{{ end -}}
 {{- $secret := $d.existingSecret | default (printf "%s-key" $name) -}}
 {{- $engines := list -}}
-{{- range $lane := include "samma-siem.lanes" . | fromJsonArray -}}
+{{- range $lane := include "samma-siem.engines" . | fromJsonArray -}}
 {{- $svc := include "samma-siem.workloadName" (dict "root" $ "suffix" (printf "detection-engine-%s" $lane.name)) -}}
 {{- $engines = append $engines (printf "%s=http://%s:9090" $lane.name $svc) -}}
 {{- end -}}

@@ -2,13 +2,14 @@
 {{- /*
 One detection-engine per lane: samma.logs.<lane> (consumer
 detection-engine-<lane> on SIEM_LOGS, created by the streams Job) ->
-Sigma rules -> samma.alerts.<lane>.
+Sigma rules -> samma.alerts.<lane>. And one per service lane, the same on
+samma.logs.svc.<lane> in SIEM_SERVICES.
 */ -}}
 {{- $v := .Values.detectionEngine -}}
 {{- $image := include "samma-siem.workloadImage" (dict "name" "detectionEngine" "values" $v) -}}
 {{- $nats := include "samma-siem.natsUrl" . -}}
 {{- $reserved := list "ENGINE_LOG_SOURCE" "ENGINE_TRANSPORT" "ENGINE_NATS_URL" "ENGINE_NATS_STREAM" "ENGINE_NATS_CONSUMER" "ENGINE_NATS_SUBJECT" "ENGINE_RULES_DIR" "ENGINE_WORKERS" "ENGINE_VISIBILITY_TIMEOUT" "ENGINE_METRICS_ADDR" -}}
-{{- range $lane := include "samma-siem.lanes" . | fromJsonArray }}
+{{- range $lane := include "samma-siem.engines" . | fromJsonArray }}
 {{- $name := include "samma-siem.workloadName" (dict "root" $ "suffix" (printf "detection-engine-%s" $lane.name)) }}
 ---
 apiVersion: apps/v1
@@ -52,11 +53,11 @@ spec:
             - name: ENGINE_NATS_URL
               value: {{ $nats | quote }}
             - name: ENGINE_NATS_STREAM
-              value: SIEM_LOGS
+              value: {{ $lane.stream }}
             - name: ENGINE_NATS_CONSUMER
               value: {{ printf "detection-engine-%s" $lane.name | quote }}
             - name: ENGINE_NATS_SUBJECT
-              value: {{ printf "samma.logs.%s" $lane.name | quote }}
+              value: {{ $lane.subject | quote }}
             - name: ENGINE_RULES_DIR
               value: /rules
             - name: ENGINE_WORKERS

@@ -1,0 +1,124 @@
+{{- $services := include "samma-siem.serviceLanes" . | fromJsonArray -}}
+{{- if and $services .Values.logRouter.enabled }}
+{{- /*
+k8s-log-router (samma-io/k8s-log-router): pod logs from node shippers ->
+allowlist (serviceLanes) -> samma.logs.svc.<lane> (SIEM_SERVICES). The
+config is files/k8s-log-router/, a verbatim copy of that repo's router/;
+the chart only replaces the VRL's lanes object with serviceLanes.
+*/ -}}
+{{- $v := .Values.logRouter -}}
+{{- $name := include "samma-siem.workloadName" (dict "root" . "suffix" "k8s-log-router") -}}
+{{- $allow := dict -}}
+{{- range $services }}{{ $_ := set $allow .name .namespaces }}{{ end -}}
+{{- $vrl := .Files.Get "files/k8s-log-router/k8s-router.vrl" -}}
+{{- $lanesRe := "(?s)\nlanes = \\{.*?\n\\}\n" -}}
+{{- if not (regexMatch $lanesRe $vrl) }}{{ fail "files/k8s-log-router/k8s-router.vrl has no lanes = { ... } block to replace" }}{{ end -}}
+{{- $vrl = regexReplaceAll $lanesRe $vrl (printf "\nlanes = %s\n" (toJson $allow)) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: k8s-log-router
+data:
+  vector.yaml: |
+    {{- .Files.Get "files/k8s-log-router/vector.yaml" | nindent 4 }}
+  k8s-router.vrl: |
+    {{- $vrl | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: k8s-log-router
+  annotations:
+    {{- include "samma-siem.argocdWorkloadWave" . | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "samma-siem.selectorLabels" (dict "root" . "component" "k8s-log-router") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "samma-siem.labels" . | nindent 8 }}
+        app.kubernetes.io/component: k8s-log-router
+      annotations:
+        # The allowlist is read at start: a change rolls the pods.
+        checksum/config: {{ printf "%s%s" (.Files.Get "files/k8s-log-router/vector.yaml") $vrl | sha256sum }}
+        {{- with .Values.workloads.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "samma-siem.workloadPodSpec" . | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vector
+          image: {{ include "samma-siem.workloadImage" (dict "name" "logRouter" "values" $v) }}
+          imagePullPolicy: {{ $v.pullPolicy }}
+          args: ["--config", "/etc/k8s-log-router/vector.yaml"]
+          env:
+            - name: NATS_URL
+              value: {{ include "samma-siem.natsUrl" . | quote }}
+            - name: VRL_DIR
+              value: /etc/k8s-log-router
+          ports:
+            - name: fluent
+              containerPort: 24224
+            - name: vector
+              containerPort: 6000
+            - name: vector-api
+              containerPort: 8686
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: vector-api
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: vector-api
+            periodSeconds: 10
+          securityContext:
+            {{- include "samma-siem.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/k8s-log-router
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/vector
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: data
+          emptyDir: {}
+---
+# Where node shippers send pod logs. Inside the cluster only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "samma-siem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: k8s-log-router
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "samma-siem.selectorLabels" (dict "root" . "component" "k8s-log-router") | nindent 4 }}
+  ports:
+    - name: fluent
+      port: 24224
+      targetPort: fluent
+    - name: vector
+      port: 6000
+      targetPort: vector
+{{- end }}
