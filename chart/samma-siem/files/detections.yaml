@@ -1,0 +1,54 @@
+# The detections this chart can deploy, keyed by the name used in
+# values.yaml `detections`. Each one is a detection-engine lane plus the input
+# that feeds it. Read by the samma-siem.detections helper.
+#
+#   lane       the engine lane: consumer detection-engine-<lane>, rules
+#              rules/<lane>/ in the detection-engine image
+#   raw        the lane has raw records in SIEM_RAW (normalised by Vector)
+#   service    a service lane (SIEM_SERVICES, k8s-log-router); namespaces is
+#              the default allowlist, overridable per detection
+#   ingester   the ingester source that feeds the lane
+#   gateway    a gateway this chart deploys for the lane
+#   input      where the records come from, for NOTES and the README
+workspace:
+  lane: workspace
+  raw: true
+  ingester: google-workspace
+  input: ingester google-workspace (Admin Reports API), normalised by Vector
+slack:
+  lane: slack
+  raw: true
+  ingester: slack
+  input: ingester slack (audit logs); the baked Vector config does not normalise this lane yet
+onepassword:
+  lane: onepassword
+  raw: true
+  ingester: onepassword
+  input: ingester onepassword (Events API); the baked Vector config does not normalise this lane yet
+cloudflare:
+  lane: cloudflare
+  raw: true
+  ingester: cloudflare
+  input: ingester cloudflare (audit, access, gateway); the baked Vector config does not normalise this lane yet
+osquery:
+  lane: osquery
+  raw: false
+  gateway: osquery
+  input: osquery-client hosts over mutual TLS to the osquery gateway
+wazuh:
+  lane: wazuh
+  raw: false
+  input: a Wazuh manager publishing alerts to samma.logs.wazuh (samma-io/wazuh-kubernetes collector)
+k8s:
+  lane: k8s
+  raw: false
+  input: Kubernetes API server audit events published to samma.logs.k8s
+scanner:
+  lane: scanner
+  raw: false
+  input: Samma scanner findings published to samma.logs.scanner
+traefik:
+  lane: traefik
+  service: true
+  namespaces: [traefik]
+  input: Traefik JSON access log from pods labelled samma.io/detection=traefik, through k8s-log-router

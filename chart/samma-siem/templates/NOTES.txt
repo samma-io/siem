@@ -12,11 +12,29 @@ S3:      {{ include "samma-siem.s3Endpoint" . }}, bucket {{ .Values.s3.bucket }}
 S3:      {{ .Values.s3.endpoint }}, bucket {{ .Values.s3.bucket }}
 {{- end }}
 
+{{- $dets := include "samma-siem.detections" . | fromJsonArray }}
+{{- if $dets }}
+
+Detections (detections.<name>.enabled), and what feeds each:
+{{- range $dets }}
+  {{ .name }}: {{ .input }}
+{{- if and (not .ingester) (not .gateway) (not .service) }}
+         -> not deployed by this chart: publish to samma.logs.{{ .lane }} on {{ include "samma-siem.natsUrl" $ }}
+{{- end }}
+{{- if .service }}
+         -> point a node shipper at {{ include "samma-siem.workloadName" (dict "root" $ "suffix" "k8s-log-router") }}:24224 (Fluent forward) or :6000 (Vector);
+            label pods samma.io/detection={{ .lane }} in {{ join ", " .namespaces }}
+{{- end }}
+{{- if .gateway }}
+         -> hosts send to {{ include "samma-siem.workloadName" (dict "root" $ "suffix" "osquery-gateway") }} ({{ $.Values.osqueryGateway.service.type }}, port {{ $.Values.osqueryGateway.service.port }}{{ with $.Values.osqueryGateway.service.nodePort }}, nodePort {{ . }}{{ end }})
+{{- end }}
+{{- end }}
+{{- end }}
 {{- $lanes := include "samma-siem.lanes" . | fromJsonArray }}
 
 Workloads (Postgres DSN from Secret {{ .Values.postgres.existingSecret | default "-" }}, key {{ .Values.postgres.dsnKey }}):
 {{- if .Values.ingester.enabled }}
-{{- range .Values.ingester.sources }}
+{{- range include "samma-siem.ingesterSources" . | fromJsonArray }}
 {{- $cfg := get ($.Values.ingester.perSource | default dict) (toString .) | default dict }}
   ingester-{{ . }}{{ if eq (int (hasKey $cfg "replicas" | ternary $cfg.replicas $.Values.ingester.replicas)) 0 }} (replicas: 0 until it has a credential){{ end }}
 {{- end }}
@@ -38,7 +56,7 @@ Workloads (Postgres DSN from Secret {{ .Values.postgres.existingSecret | default
 {{- if .Values.alertDestination.enabled }}
   alert-destination -> siem_alerts{{ with include "samma-siem.alertTokenDestinations" . | fromJsonArray }}, {{ join ", " . }} (tokens from Secret {{ $.Values.alertDestination.existingSecret }}){{ end }}
 {{- end }}
-{{- if .Values.storage.enabled }}
+{{- if include "samma-siem.storageOn" . }}
   siem-storage ({{ join ", " (include "samma-siem.storageBackends" . | fromJsonArray) }})
 {{- end }}
 {{- if .Values.quickwit.enabled }}

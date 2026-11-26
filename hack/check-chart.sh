@@ -312,7 +312,7 @@ check_workload ci-samma-siem-vector \
 # The k8s and scanner overlays layer on the base config, which reads
 # vector-workspace: without the workspace raw lane they are refused, and with
 # vector.enabled: false there is no Vector and none of its consumers.
-nows=(--set-json 'lanes=[{"name":"k8s","raw":false},{"name":"scanner","raw":false}]' --set ingester.enabled=false)
+nows=(--set-json 'lanes=[{"name":"k8s","raw":false},{"name":"scanner","raw":false}]' --set ingester.enabled=false --set detections.workspace.enabled=false)
 render "${all_values[@]}" "${nows[@]}" >/dev/null 2>&1 && fail "the k8s and scanner overlays rendered without the workspace lane"
 render "${all_values[@]}" "${nows[@]}" --set streams.enabled=false >/dev/null 2>&1 && fail "the k8s and scanner overlays rendered without the workspace lane (no streams)"
 render "${all_values[@]}" --set-json 'lanes=[{"name":"workspace","raw":false},{"name":"k8s","raw":false}]' --set ingester.enabled=false >/dev/null 2>&1 \
@@ -370,7 +370,7 @@ grep -qF 'value: "https://s3.example.invalid"' <<<"$(doc ci-samma-siem-siem-stor
 grep -qF 'name: s3' <<<"$(doc ci-samma-siem-siem-storage Deployment)" || fail "siem-storage does not use s3.existingSecret"
 
 # No lane with raw records: no Vector.
-out=$(render --set 'lanes[0].name=k8s' --set 'lanes[0].raw=false' --set ingester.enabled=false \
+out=$(render --set 'lanes[0].name=k8s' --set 'lanes[0].raw=false' --set ingester.enabled=false --set detections.workspace.enabled=false \
   --set nats.config.jetstream.fileStore.pvc.size=4Gi)
 [ "$(deployments)" = "$(printf '%s\n' ci-minio ci-samma-siem-alert-destination ci-samma-siem-detection-engine-k8s ci-samma-siem-siem-storage | sort)" ] \
   || fail "raw: false only: $(deployments | tr '\n' ' ')"
@@ -525,5 +525,30 @@ render --set-json 'serviceLanes=[{"name":"traefik"}]' >/dev/null 2>&1 && fail "a
 render --set-json 'serviceLanes=[{"name":"workspace","namespaces":["a"]}]' >/dev/null 2>&1 && fail "a service lane rendered with a lanes name"
 render --set-json 'serviceLanes=[{"name":"x*","namespaces":["a"]}]' >/dev/null 2>&1 && fail "a wildcard service lane rendered"
 render "${svc_values[@]}" --set logRouter.enabled=false | grep -qF 'name: ci-samma-siem-k8s-log-router' && fail "the router rendered with logRouter.enabled=false"
+
+# Detections: each switch deploys its whole lane, nothing else.
+out=$(render --set detections.workspace.enabled=false --set detections.traefik.enabled=true)
+[ "$(deployments | tr '\n' ' ')" = "ci-minio ci-samma-siem-alert-destination ci-samma-siem-detection-engine-traefik ci-samma-siem-k8s-log-router " ] \
+  || fail "traefik only: $(deployments | tr '\n' ' ')"
+grep -qF 'stream.SIEM_LOGS.json' <<<"$out" && fail "traefik only still creates SIEM_LOGS"
+grep -qF 'storage-logs' <<<"$out" && fail "traefik only still creates storage-logs"
+grep -qF 'lanes = {"traefik":["traefik"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "traefik detection allowlist"
+out=$(render --set detections.traefik.enabled=true --set-json 'detections.traefik.namespaces=["edge","traefik"]')
+grep -qF 'lanes = {"traefik":["edge","traefik"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" || fail "detections.traefik.namespaces not used"
+osq=(--set detections.osquery.enabled=true --set osqueryGateway.existingSecret=osq-tls)
+out=$(render "${osq[@]}" --set detections.wazuh.enabled=true)
+grep -qF '"subjects": ["samma.logs.osquery","samma.logs.wazuh","samma.logs.workspace"],' <<<"$(stream SIEM_LOGS)" || fail "osquery + wazuh SIEM_LOGS subjects"
+check_workload ci-samma-siem-osquery-gateway 'image: timberio/vector:0.53.0-distroless-libc' 'containerPort: 8443' \
+  'secretName: osq-tls' 'value: /etc/osquery-gateway/tls' 'checksum/config:'
+check_workload ci-samma-siem-detection-engine-wazuh 'value: "samma.logs.wazuh"'
+grep -qE 'type: (NodePort|LoadBalancer)' <<<"$(doc ci-samma-siem-osquery-gateway Service)" && fail "the osquery gateway is exposed by default"
+grep -qF 'nodePort: 30516' <<<"$(render "${osq[@]}" --set osqueryGateway.service.type=NodePort --set osqueryGateway.service.nodePort=30516)" \
+  || fail "osqueryGateway.service.nodePort not rendered"
+render --set detections.osquery.enabled=true >/dev/null 2>&1 && fail "the osquery gateway rendered without its Secret"
+render --set detections.nope.enabled=true >/dev/null 2>&1 && fail "an unknown detection rendered"
+render --set detections.workspace.enabled=false >/dev/null 2>&1 && fail "a SIEM with no detection rendered"
+render --set detections.slack.enabled=true | grep -qF 'name: ci-samma-siem-ingester-slack' || fail "detections.slack did not add its ingester"
+render --set detections.traefik.enabled=true --set-json 'serviceLanes=[{"name":"traefik","namespaces":["x"]}]' >/dev/null 2>&1 \
+  && fail "traefik in both detections and serviceLanes rendered"
 
 echo "chart render checks passed"

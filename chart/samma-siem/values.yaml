@@ -11,21 +11,37 @@
 # Nothing here is exposed outside the cluster: every Service is ClusterIP and
 # the chart renders no Ingress.
 
-# Lanes captured by the streams (README, "Lanes"). Only deployed lanes: a
-# lane listed here gets its subjects in SIEM_RAW and SIEM_LOGS and its
-# durable consumers. Do not use a wildcard. The legacy pipeline publishes
-# samma.logs.k8s and samma.logs.k8s.audit (~11 MiB/min) on core NATS, and a
-# stream on samma.logs.> would fill its byte cap within the hour.
+# Detections: switch on what you want detected, and the chart deploys the
+# whole lane for it: the streams and consumers, the detection engine and,
+# where this chart can run it, the input (an ingester source, the osquery
+# gateway, the k8s log router). files/detections.yaml is the catalog; the
+# README, "Detections", lists what each one needs. Inputs this chart cannot
+# run (wazuh, k8s, scanner) are listed in NOTES after install.
+#
+# traefik (and any service detection) takes namespaces: the namespaces whose
+# pods may feed it. osquery needs osqueryGateway.existingSecret.
+detections:
+  workspace: {enabled: true}
+  slack: {enabled: false}
+  onepassword: {enabled: false}
+  cloudflare: {enabled: false}
+  osquery: {enabled: false}
+  wazuh: {enabled: false}
+  k8s: {enabled: false}
+  scanner: {enabled: false}
+  traefik: {enabled: false, namespaces: [traefik]}
+
+# Advanced: lanes captured by the streams beyond the ones detections enable
+# (README, "Lanes"). Normally empty. Never a wildcard: the legacy pipeline
+# publishes samma.logs.k8s and samma.logs.k8s.audit (~11 MiB/min) on core
+# NATS, and a stream on samma.logs.> would fill its byte cap within the hour.
 #
 # An entry is a lane name, or {name, raw} where raw: false leaves the lane
-# out of SIEM_RAW (no samma.raw.<lane>, no vector-<lane> consumer). The k8s,
-# scanner and wazuh lanes of the contract have no raw records.
-#   - workspace
+# out of SIEM_RAW (no samma.raw.<lane>, no vector-<lane> consumer).
 #   - {name: k8s, raw: false}
-#   - {name: wazuh, raw: false}
-lanes:
-  - workspace
+lanes: []
 
+# Advanced: service lanes beyond the ones detections enable. Normally empty.
 # Service lanes: logs of labelled Kubernetes workloads (samma-io/k8s-log-router).
 # A pod labelled samma.io/detection: <name> in one of the namespaces listed
 # for <name> is forwarded by the log router to samma.logs.svc.<name> (stream
@@ -48,14 +64,15 @@ serviceLanes: []
 # (INGESTER_SECRETS=file, INGESTER_<SOURCE>_TOKEN_FILE; ingester README,
 # "Token secrets"), which needs an image from samma-io/ingester main at
 # b4c844c or later: 89ed408 predates it. Each of those publishes to
-# samma.raw.<source>, so its lane must be in lanes with raw records, and the
+# samma.raw.<source>, so its lane must have raw records (its detection, or
+# lanes), and the
 # baked Vector config reads only the workspace lane: their records stay
 # unfiltered in SIEM_RAW (consumer vector-<source> unread) until a Vector
 # image normalises those lanes.
 ingester:
   enabled: true
-  sources:
-    - google-workspace
+  # Advanced: sources beyond the ones detections enable. Normally empty.
+  sources: []
   image: ghcr.io/samma-io/ingester
   tag: 89ed408
   digest: ""
@@ -484,6 +501,35 @@ logRouter:
   resources:
     requests:
       cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# osquery gateway (samma-io/osquery-client gateway/): rendered with
+# detections.osquery. A Vector Deployment that takes osqueryd's TLS logger
+# batches over mutual TLS and publishes one record per result to
+# samma.logs.osquery. The only credential is the client certificate: hosts
+# need a certificate signed by the CA in the Secret.
+#
+# existingSecret holds server.crt, server.key and ca.crt (created by hand,
+# see samma-io/osquery-client pki/). Hosts outside the cluster must reach
+# the Service: set service.type NodePort (with nodePort) or LoadBalancer.
+# The default ClusterIP only serves clients inside the cluster.
+osqueryGateway:
+  enabled: true
+  image: timberio/vector
+  tag: 0.53.0-distroless-libc
+  digest: ""
+  pullPolicy: IfNotPresent
+  replicas: 1
+  existingSecret: ""
+  service:
+    type: ClusterIP
+    port: 8443
+    nodePort: null
+  resources:
+    requests:
+      cpu: 20m
       memory: 64Mi
     limits:
       memory: 256Mi
