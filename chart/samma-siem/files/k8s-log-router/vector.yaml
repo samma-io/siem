@@ -25,6 +25,10 @@ sources:
     strict_path: false
     path_key: _push_path
     method: POST
+    # The whole body is one JSON value (pretty-printed or not); an array
+    # becomes one event per element.
+    framing:
+      method: bytes
     decoding:
       codec: json
     auth:
