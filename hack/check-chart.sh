@@ -126,7 +126,7 @@ want_cons=$(printf '%s\n' SIEM_ALERTS.alert-destination SIEM_ALERTS.storage-s3-a
 [ "$(consumers)" = "$want_cons" ] || fail "default consumers: $(consumers | tr '\n' ' ')"
 grep -qE 'name: ci-samma-siem-(quickwit|grafana)$' <<<"$out" && fail "quickwit or grafana rendered by default"
 check_workload ci-samma-siem-detection-engine-workspace \
-  'image: ghcr.io/samma-io/detection-engine:65cbbd0' \
+  'image: ghcr.io/samma-io/detection-engine:5a4e082' \
   '- name: ENGINE_TRANSPORT' 'value: "workspace"' "$nats" \
   'value: "detection-engine-workspace"' 'value: "samma.logs.workspace"' \
   '- name: ENGINE_VISIBILITY_TIMEOUT' 'value: "300s"' 'path: /readyz'
@@ -502,5 +502,28 @@ render --set dashboard.enabled=true --set dashboard.key=k --set dashboard.url=ht
 render --set dashboard.enabled=true --set dashboard.key=k --set detectionEngine.enabled=false >/dev/null 2>&1 && fail "the reporter rendered without engines"
 render --set dashboard.enabled=true --set dashboard.key=k --set reporter.intervalSeconds=5 >/dev/null 2>&1 && fail "the reporter rendered with a 5 second interval"
 render --set dashboard.enabled=true --set dashboard.key=k --set-json 'reporter.env={"REPORTER_ALLOW_HTTP":"true"}' >/dev/null 2>&1 && fail "REPORTER_ALLOW_HTTP was set through reporter.env"
+
+# Service lanes: nothing by default; with serviceLanes, SIEM_SERVICES, one
+# engine and consumer per service lane, and the log router whose allowlist is
+# exactly serviceLanes. Bad entries are refused.
+out=$(render)
+grep -qE 'k8s-log-router|SIEM_SERVICES' <<<"$out" && fail "service-lane objects rendered without serviceLanes"
+svc_values=(--set-json 'serviceLanes=[{"name":"traefik","namespaces":["traefik"]},{"name":"vault","namespaces":["vault","vault-system"]}]')
+out=$(render "${svc_values[@]}")
+grep -qF '"subjects": ["samma.logs.svc.>"],' <<<"$(stream SIEM_SERVICES)" || fail "SIEM_SERVICES subjects"
+grep -qF '"max_bytes": 104857600,' <<<"$(stream SIEM_SERVICES)" || fail "SIEM_SERVICES max_bytes is not 100MiB"
+for l in traefik vault; do
+  grep -qF "\"filter_subject\": \"samma.logs.svc.$l\"" <<<"$(cons SIEM_SERVICES.detection-engine-$l)" || fail "consumer detection-engine-$l on SIEM_SERVICES"
+  check_workload ci-samma-siem-detection-engine-$l "value: \"$l\"" 'value: SIEM_SERVICES' "value: \"samma.logs.svc.$l\""
+done
+check_workload ci-samma-siem-k8s-log-router 'image: timberio/vector:0.53.0-distroless-libc' 'containerPort: 24224' \
+  'containerPort: 6000' 'automountServiceAccountToken: false' 'checksum/config:'
+grep -qF 'lanes = {"traefik":["traefik"],"vault":["vault","vault-system"]}' <<<"$(doc ci-samma-siem-k8s-log-router ConfigMap)" \
+  || fail "the router allowlist is not serviceLanes"
+grep -qE 'hostPath|serviceAccountName' <<<"$(doc ci-samma-siem-k8s-log-router Deployment)" && fail "the router has host mounts or an API identity"
+render --set-json 'serviceLanes=[{"name":"traefik"}]' >/dev/null 2>&1 && fail "a service lane rendered without namespaces"
+render --set-json 'serviceLanes=[{"name":"workspace","namespaces":["a"]}]' >/dev/null 2>&1 && fail "a service lane rendered with a lanes name"
+render --set-json 'serviceLanes=[{"name":"x*","namespaces":["a"]}]' >/dev/null 2>&1 && fail "a wildcard service lane rendered"
+render "${svc_values[@]}" --set logRouter.enabled=false | grep -qF 'name: ci-samma-siem-k8s-log-router' && fail "the router rendered with logRouter.enabled=false"
 
 echo "chart render checks passed"

@@ -155,6 +155,49 @@ a lowercase name (lane-names.md); a plain string has raw: true.
 {{- end -}}
 
 {{- /*
+samma-siem.serviceLanes: serviceLanes as a JSON list of {name, namespaces},
+validated. A name is also a lane name, so it may not be in lanes too.
+*/ -}}
+{{- define "samma-siem.serviceLanes" -}}
+{{- $out := list -}}
+{{- $seen := dict -}}
+{{- $lanes := list -}}
+{{- range include "samma-siem.lanes" . | fromJsonArray }}{{ $lanes = append $lanes .name }}{{ end -}}
+{{- range .Values.serviceLanes | default list -}}
+{{- if not (kindIs "map" .) }}{{ fail (printf "serviceLanes entry %v: a map like {name: traefik, namespaces: [traefik]}" .) }}{{ end -}}
+{{- $name := toString (.name | default "") -}}
+{{- if not (regexMatch "^[a-z0-9]+(-[a-z0-9]+)*$" $name) -}}
+{{- fail (printf "serviceLanes %q: a lowercase name like traefik, never a wildcard" $name) -}}
+{{- end -}}
+{{- if hasKey $seen $name }}{{ fail (printf "serviceLanes %q is listed twice" $name) }}{{ end -}}
+{{- $_ := set $seen $name true -}}
+{{- if has $name $lanes }}{{ fail (printf "serviceLanes %q is also in lanes: one engine per lane name" $name) }}{{ end -}}
+{{- $ns := .namespaces | default list -}}
+{{- if not $ns }}{{ fail (printf "serviceLanes %q needs namespaces: the namespaces whose pods may feed it" $name) }}{{ end -}}
+{{- range $ns -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .)) }}{{ fail (printf "serviceLanes %q: namespace %q is not a namespace name" $name (toString .)) }}{{ end -}}
+{{- end -}}
+{{- $out = append $out (dict "name" $name "namespaces" $ns) -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}
+
+{{- /*
+samma-siem.engines: every detection engine, {name, stream, subject}: one per
+lane on SIEM_LOGS and one per service lane on SIEM_SERVICES.
+*/ -}}
+{{- define "samma-siem.engines" -}}
+{{- $out := list -}}
+{{- range include "samma-siem.lanes" . | fromJsonArray -}}
+{{- $out = append $out (dict "name" .name "stream" "SIEM_LOGS" "subject" (printf "samma.logs.%s" .name)) -}}
+{{- end -}}
+{{- range include "samma-siem.serviceLanes" . | fromJsonArray -}}
+{{- $out = append $out (dict "name" .name "stream" "SIEM_SERVICES" "subject" (printf "samma.logs.svc.%s" .name)) -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}
+
+{{- /*
 samma-siem.podSecurity / samma-siem.containerSecurity: the hardened
 contexts every hook Job here runs with.
 */ -}}

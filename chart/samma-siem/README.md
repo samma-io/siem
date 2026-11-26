@@ -19,7 +19,7 @@ grafana ─► quickwit (search; metastore in Postgres, index on S3)
 It installs:
 
 - NATS with JetStream on a file store (the official `nats` chart, `nats.enabled`)
-- the streams `SIEM_RAW`, `SIEM_LOGS`, `SIEM_ALERTS` and `INGESTER_SLICES`, and
+- the streams `SIEM_RAW`, `SIEM_LOGS`, `SIEM_ALERTS` and `INGESTER_SLICES` (plus `SIEM_SERVICES` with service lanes), and
   their durable consumers, created by a hook Job
 - the pipeline workloads and siem-storage (see "Workloads")
 - Quickwit and Grafana, off by default (see "Storage, search and dashboards")
@@ -118,6 +118,68 @@ upgrade.
 filters only `workspace`, so those lanes' records are not normalised: they stay
 unfiltered in `SIEM_RAW` until its `maxAge`, and nothing reaches their
 `samma.logs.<lane>` or detection-engine until a Vector image reads them.
+
+## Service lanes
+
+A service lane carries the logs of chosen Kubernetes workloads, such as Traefik's
+access log, into detection. Opt a workload in by labelling its **pod template**
+`samma.io/detection: <lane>`, and list the lane here with the namespaces allowed to
+feed it:
+
+```yaml
+serviceLanes:
+  - {name: traefik, namespaces: [traefik]}
+```
+
+```
+pod (label samma.io/detection: traefik)
+  → node shipper (fluent-bit or a Vector agent, not part of this chart)
+  → <release>-k8s-log-router (allowlist = serviceLanes)
+  → samma.logs.svc.traefik (stream SIEM_SERVICES)
+  → <release>-detection-engine-traefik → samma.alerts.traefik → alert-destination
+```
+
+Each entry gives:
+
+| What | Name |
+|---|---|
+| subject in `SIEM_SERVICES` | `samma.logs.svc.<lane>` |
+| consumer on `SIEM_SERVICES` | `detection-engine-<lane>` |
+| Deployment and Service | `<release>-detection-engine-<lane>` |
+| allowlist entry in the router | `<lane>` from the listed namespaces only |
+
+- **The allowlist is the security boundary.** A label is only a request: a record
+  whose lane is not listed, or whose pod runs in a namespace not listed for that
+  lane, is dropped. Otherwise anyone allowed to label a pod could write into any
+  lane and forge its alerts.
+- **The router** (`logRouter`, [samma-io/k8s-log-router](https://github.com/samma-io/k8s-log-router))
+  is rendered when `serviceLanes` is not empty. It is one Vector Deployment with a
+  ClusterIP Service: port `24224` takes Fluent forward (fluent-bit), port `6000`
+  Vector native. It has no Kubernetes API access and no host mounts. The config in
+  `files/k8s-log-router/` is a verbatim copy of that repo's `router/`; the chart only
+  writes the lanes object.
+- **`SIEM_SERVICES`** (`streams.services`, 24h, 100 MiB) is a stream of its own so
+  that a burst of access logs never pushes other lanes out of `SIEM_LOGS`. Its cap
+  counts towards the JetStream PVC check. siem-storage does not read it:
+  detection only.
+- **Shippers.** Point fluent-bit at the router with an extra output (its kubernetes
+  filter must be able to read pods, or every record arrives without labels and is
+  dropped):
+
+  ```
+  [OUTPUT]
+      Name          forward
+      Match         kube.*
+      Host          <release>-k8s-log-router.<namespace>.svc.cluster.local
+      Port          24224
+      Retry_Limit   5
+  ```
+
+- **The engine image** must know the lane: `traefik` needs detection-engine `5a4e082`
+  or later. A name in both `lanes` and `serviceLanes` is refused.
+
+The guide `samma-io/guide` `10-kubernetes-service-logs` walks through Traefik end
+to end.
 
 ## Streams and consumers
 
@@ -233,7 +295,7 @@ are the tags running on v2:
 |---|---|---|
 | `ingester` | `89ed408` | NATS transport (ingester#5); no token files (Slack, 1Password and Cloudflare need `b4c844c` or later) |
 | `vector` | `f2f2dea` | `config/vector-k8s.yaml`, the Workspace lane; no Quickwit overlays (needs `34806c1` or later with `quickwit.enabled`, `5fbdb00` or later with it and the k8s or scanner lane) |
-| `detectionEngine` | `65cbbd0` | NATS transport; knows the SaaS, k8s, scanner and wazuh lanes. Runs the wazuh lane on v2; the workspace lane there is still on `d5d7439` |
+| `detectionEngine` | `5a4e082` | NATS transport; knows the SaaS, k8s, scanner, wazuh, osquery and traefik lanes. Runs the traefik lane on v2 |
 | `alertDestination` | `779befa` | NATS transport, Postgres ledger and destination; no Slack or GitHub (needs `e9987eb` or later to route to them) |
 | `storage` | `sha-6c3f143` | siem-storage `main` with the Postgres and S3 backends, built by its CI |
 | `quickwit` | none, required | pushed by hand, see "Images built by hand" |
@@ -241,7 +303,7 @@ are the tags running on v2:
 
 **Lanes that need a newer image.** The `k8s` and `scanner` lanes and their rules
 are in detection-engine `main` from `0c5b5ce` on, and the `wazuh` lane from
-`65cbbd0` on. An older image refuses a lane it does not know, so keep
+`65cbbd0` on, `osquery` from `659dc4a` and `traefik` from `5a4e082`. An older image refuses a lane it does not know, so keep
 `detectionEngine.tag` at or above those when overriding it. The baked Vector config reads only `vector-workspace`, so a
 raw lane other than `workspace` needs a Vector image whose config reads it.
 With `quickwit.enabled`, Vector gets the Quickwit overlays, which are in
@@ -508,6 +570,10 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | Key | Default | What |
 |---|---|---|
 | `lanes` | `[workspace]` | Deployed lanes, see "Lanes" |
+| `serviceLanes` | `[]` | `{name, namespaces}` per service lane, see "Service lanes" |
+| `logRouter.enabled` | `true` | Render the log router when `serviceLanes` is not empty |
+| `logRouter.{image,tag,digest}` | `timberio/vector`, `0.53.0-distroless-libc` | Router image |
+| `logRouter.{replicas,resources}` | `1`, 50m/64Mi, 256Mi limit | Router size |
 | `ingester.sources` | `[google-workspace]` | Ingester sources with a slice consumer |
 | `nats.enabled` | `true` | Install the `nats` chart (2.15.0) with JetStream |
 | `nats.config.jetstream.fileStore.pvc.size` | `1Gi` | JetStream PVC; must hold the stream caps (`4Gi` with the `k8s` lane) |
@@ -516,8 +582,8 @@ If the packages are private, list a pull Secret in `workloads.imagePullSecrets`.
 | `nats.*` | | Passed to the [nats chart](https://github.com/nats-io/k8s/tree/main/helm/charts/nats) |
 | `externalNats.url` | empty | NATS URL when `nats.enabled` is false (required then) |
 | `streams.enabled` | `true` | Render the streams ConfigMap and Job |
-| `streams.{raw,logs,alerts,ingesterSlices}.maxAge` | see table | Whole number with `s`, `m`, `h` or `d` |
-| `streams.{raw,logs,alerts,ingesterSlices}.maxBytes` | see table | Whole number with `B`, `KiB`, `MiB`, `GiB` or `TiB` |
+| `streams.{raw,logs,services,alerts,ingesterSlices}.maxAge` | see table | Whole number with `s`, `m`, `h` or `d` |
+| `streams.{raw,logs,services,alerts,ingesterSlices}.maxBytes` | see table | Whole number with `B`, `KiB`, `MiB`, `GiB` or `TiB` |
 | `streams.{raw,logs,alerts,ingesterSlices}.duplicateWindow` | see table | Duration as above; `raw` at least 6h plus the Workspace `reconcileInterval` |
 | `streams.logs.laneMaxBytes` | `{k8s: 2GiB}` | Added to `SIEM_LOGS`'s cap per lane in `lanes`; grow the PVC with it |
 | `consumers.maxDeliver` | `5` | Deliveries before a message is given up |

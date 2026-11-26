@@ -26,6 +26,17 @@
 lanes:
   - workspace
 
+# Service lanes: logs of labelled Kubernetes workloads (samma-io/k8s-log-router).
+# A pod labelled samma.io/detection: <name> in one of the namespaces listed
+# for <name> is forwarded by the log router to samma.logs.svc.<name> (stream
+# SIEM_SERVICES) and gets its own detection-engine-<name>. Any other label
+# value or namespace is dropped, so a label cannot write into another lane.
+# The detection engine image must know the lane (traefik: 5a4e082 or later).
+# Node shippers (fluent-bit, a Vector agent) are not part of this chart; point
+# them at the logRouter Service (README, "Service lanes").
+#   - {name: traefik, namespaces: [traefik]}
+serviceLanes: []
+
 # The ingester: SaaS audit-log puller (samma-io/ingester), one Deployment
 # per source running `daemon` with INGESTER_TRANSPORT=nats. Each source gets
 # a worker consumer ingester-<source> on samma.ingester.slices.<source>
@@ -199,6 +210,13 @@ streams:
   alerts:
     maxAge: 30d
     maxBytes: 200MiB
+    duplicateWindow: 2m
+  # SIEM_SERVICES: samma.logs.svc.>, records from the log router (created
+  # only with serviceLanes). Its own stream so a burst of access logs cannot
+  # push other lanes' records out of SIEM_LOGS. Not stored by siem-storage.
+  services:
+    maxAge: 24h
+    maxBytes: 100MiB
     duplicateWindow: 2m
   # INGESTER_SLICES: samma.ingester.slices.>, a work queue (a message is
   # gone once acked). Retention cannot be changed after creation.
@@ -427,13 +445,17 @@ vector:
 # detection.alert.v1 to samma.alerts.<lane>. The rules are baked into the
 # image (/rules). ENGINE_VISIBILITY_TIMEOUT is consumers.ackWait.detectionEngine.
 #
-# 65cbbd0 knows the SaaS, k8s, scanner and wazuh lanes. wazuh is NATS-only:
-# add it as {name: wazuh, raw: false}. Older images refuse lanes they do not
-# know: k8s and scanner need 0c5b5ce or later, wazuh needs 65cbbd0 or later.
+# One more per entry in serviceLanes, bound to consumer detection-engine-<name>
+# on SIEM_SERVICES (samma.logs.svc.<name>).
+#
+# 5a4e082 knows the SaaS, k8s, scanner, wazuh, osquery and traefik lanes.
+# wazuh is NATS-only: add it as {name: wazuh, raw: false}. Older images
+# refuse lanes they do not know: k8s and scanner need 0c5b5ce or later, wazuh
+# 65cbbd0, osquery 659dc4a, traefik 5a4e082.
 detectionEngine:
   enabled: true
   image: ghcr.io/samma-io/detection-engine
-  tag: 65cbbd0
+  tag: 5a4e082
   digest: ""
   pullPolicy: IfNotPresent
   replicas: 1
@@ -443,6 +465,25 @@ detectionEngine:
   resources:
     requests:
       cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# k8s-log-router (samma-io/k8s-log-router): rendered when serviceLanes is
+# not empty. A Vector Deployment that takes pod logs from node shippers on a
+# ClusterIP Service (24224 Fluent forward, 6000 Vector native), keeps only
+# allowlisted lanes (serviceLanes) and publishes them to
+# samma.logs.svc.<lane>. It has no Kubernetes API access and no host mounts.
+logRouter:
+  enabled: true
+  image: timberio/vector
+  tag: 0.53.0-distroless-libc
+  digest: ""
+  pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
       memory: 64Mi
     limits:
       memory: 256Mi
